@@ -1,0 +1,345 @@
+"""Дымовой тест game.py: ходы, статус, история, отмены, ничьи, нотация SAN."""
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from chess_game.enums import PieceType, SideType, DifficultyType
+from chess_game.field import Field
+from chess_game.move import Move
+from chess_game.point import Point
+from chess_game import rules as R
+from chess_game.game import Game, square_name
+
+
+PASS = 0
+FAIL = 0
+
+
+def check(name, cond, detail=''):
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f'  [PASS] {name}')
+    else:
+        FAIL += 1
+        print(f'  [FAIL] {name}  {detail}')
+
+
+def fools_mate_moves():
+    return [
+        Move.normal(5, 6, 5, 5),            # 1. f3
+        Move.double_pawn(4, 1, 4, 3),       # 1... e5
+        Move.double_pawn(6, 6, 6, 4),       # 2. g4
+        Move.normal(3, 0, 7, 4),            # 2... Qh4#
+    ]
+
+
+def test_fools_mate_via_game():
+    print('Тест: мат дурака через Game')
+    g = Game(player_side=SideType.WHITE, difficulty=DifficultyType.EASY)
+    for mv in fools_mate_moves():
+        ok = g.make_move(mv)
+        assert ok, f'ход {mv} не применён'
+    check('статус = checkmate', g.status == 'checkmate', g.status)
+    check('is_game_over', g.is_game_over)
+    check('SAN последнего хода содержит #', g.history[-1].san.endswith('#'),
+          g.history[-1].san)
+    check('SAN Qh4#', g.history[-1].san == 'Qh4#', g.history[-1].san)
+    check('итог: победа чёрных', 'чёрн' in g.result_ru().lower(), g.result_ru())
+    # Панель истории: первая строка «1. f3 e5»
+    lines = g.move_list_text()
+    check('первая строка истории', lines and lines[0].startswith('1. f3 e5'),
+          lines[0] if lines else 'пусто')
+
+
+def test_undo_to_start():
+    print('Тест: отмена ходов до стартовой позиции')
+    g = Game()
+    for mv in fools_mate_moves():
+        g.make_move(mv)
+    for _ in range(len(fools_mate_moves())):
+        g.undo()
+    check('история пуста', len(g.history) == 0)
+    check('ход белых', g.side_to_move == SideType.WHITE)
+    check('статус normal', g.status == 'normal')
+    check('fullmove = 1', g.fullmove_number == 1)
+    check('halfmove = 0', g.halfmove_clock == 0)
+
+
+def test_insufficient_material():
+    print('Тест: недостаточный материал — ничья')
+    field = Field.empty()
+    field.set_piece(4, 7, PieceType.KING, SideType.WHITE)   # e1
+    field.set_piece(4, 0, PieceType.KING, SideType.BLACK)   # e8
+    g = Game.from_position(field, side=SideType.WHITE)
+    check('голые короли → draw_insufficient', g.status == 'draw_insufficient', g.status)
+
+    # K + слон vs K — тоже ничья
+    field.set_piece(2, 4, PieceType.BISHOP, SideType.WHITE)
+    g2 = Game.from_position(field, side=SideType.WHITE)
+    check('K+B vs K → draw_insufficient', g2.status == 'draw_insufficient', g2.status)
+
+    # Добавим пешку — мата достаточно, игра идёт
+    field.set_piece(4, 6, PieceType.PAWN, SideType.WHITE)
+    g3 = Game.from_position(field, side=SideType.WHITE)
+    check('есть пешка → normal', g3.status == 'normal', g3.status)
+
+
+def test_50_move_rule():
+    print('Тест: правило 50 ходов')
+    field = Field.empty()
+    field.set_piece(4, 7, PieceType.KING, SideType.WHITE)
+    field.set_piece(4, 0, PieceType.KING, SideType.BLACK)
+    field.set_piece(0, 7, PieceType.ROOK, SideType.WHITE)   # ладья, чтобы мата «хватило»
+    g = Game.from_position(field, side=SideType.WHITE, halfmove=100)
+    check('halfmove=100 → draw_50', g.status == 'draw_50', g.status)
+
+    g2 = Game.from_position(field, side=SideType.WHITE, halfmove=99)
+    check('halfmove=99 → normal', g2.status == 'normal', g2.status)
+
+
+def test_threefold_repetition():
+    print('Тест: троекратное повторение (перетасовка коней)')
+    g = Game()
+    seq = [
+        Move.normal(6, 7, 5, 5),   # Nf3
+        Move.normal(6, 0, 5, 2),   # Nf6
+        Move.normal(5, 5, 6, 7),   # Ng1
+        Move.normal(5, 2, 6, 0),   # Ng8
+        Move.normal(6, 7, 5, 5),   # Nf3
+        Move.normal(6, 0, 5, 2),   # Nf6
+        Move.normal(5, 5, 6, 7),   # Ng1
+        Move.normal(5, 2, 6, 0),   # Ng8  → позиция старта 3-й раз
+    ]
+    for mv in seq:
+        ok = g.make_move(mv)
+        assert ok, f'ход {mv} не применён'
+    check('после возврата коней ×3 → draw_repetition',
+          g.status == 'draw_repetition', g.status)
+
+
+def test_repetition_irrelevant_ep():
+    print('Тест: троекратное повторение с неактуальной клеткой en passant')
+    # FIDE ст. 9.2: две позиции равны для повторения, даже если клетка ep задана,
+    # но ни одна пешка не может ею воспользоваться. Здесь первое повторение
+    # стартовой расстановки возникает СРАЗУ после ...e7-e5 (ep=e6 задано, но у
+    # белых нет пешек на d5/f5 → неактуально). Без учёта этого правила ключи
+    # первого и второго повторений различались бы и ничья не фиксировалась.
+    field = Field.empty()
+    field.set_piece(0, 7, PieceType.KING, SideType.WHITE)
+    field.set_piece(2, 5, PieceType.KNIGHT, SideType.WHITE)   # c3
+    field.set_piece(7, 0, PieceType.KING, SideType.BLACK)
+    field.set_piece(4, 1, PieceType.PAWN, SideType.BLACK)     # e7
+    rights = R.CastlingRights(wk=False, wq=False, bk=False, bq=False)
+    g = Game.from_position(field, SideType.BLACK, rights)
+    seq = [
+        Move.double_pawn(4, 1, 4, 3),   # ...e5   → S1: белый ход, ep=e6 неактуально
+        Move.normal(2, 5, 1, 7),        # Nc3-b1
+        Move.normal(7, 0, 7, 1),        # Kh8-h7
+        Move.normal(1, 7, 2, 5),        # Nb1-c3  → S4: белый ход, ep=None
+        Move.normal(7, 1, 7, 0),        # Kh7-h8
+        Move.normal(2, 5, 1, 7),        # Nc3-b1
+        Move.normal(7, 0, 7, 1),        # Kh8-h7
+        Move.normal(1, 7, 2, 5),        # Nb1-c3  → S7: белый ход, ep=None
+        Move.normal(7, 1, 7, 0),        # Kh7-h8
+    ]
+    for mv in seq:
+        ok = g.make_move(mv)
+        assert ok, f'ход {mv} не применён'
+        if g.is_game_over:
+            break
+    check('неактуальная ep не мешает зафиксировать троекратное повторение',
+          g.status == 'draw_repetition', g.status)
+
+
+def test_san_disambiguation():
+    print('Тест: SAN-разыменование (Rad1 vs Rhd1)')
+    field = Field.empty()
+    field.set_piece(4, 4, PieceType.KING, SideType.WHITE)   # белый король e4 (не мешает)
+    field.set_piece(0, 7, PieceType.ROOK, SideType.WHITE)   # ладья a1
+    field.set_piece(7, 7, PieceType.ROOK, SideType.WHITE)   # ладья h1
+    field.set_piece(4, 0, PieceType.KING, SideType.BLACK)   # чёрный король e8
+    g = Game.from_position(field, side=SideType.WHITE,
+                           rights=R.CastlingRights(wk=False, wq=False, bk=False, bq=False))
+    # Обе ладьи могут встать на d1
+    rad1 = Move.normal(0, 7, 3, 7)
+    rhd1 = Move.normal(7, 7, 3, 7)
+    check('Rad1 легален', rad1 in g.legal_moves())
+    check('Rhd1 легален', rhd1 in g.legal_moves())
+    check('SAN a1→d1 = Rad1', g.to_san(rad1) == 'Rad1', g.to_san(rad1))
+    check('SAN h1→d1 = Rhd1', g.to_san(rhd1) == 'Rhd1', g.to_san(rhd1))
+
+
+def test_fen_pgn():
+    print('Тест: FEN и PGN')
+    g = Game()
+    check('FEN стартовой позиции',
+          g.fen() == 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', g.fen())
+
+    # 1.e4: открывается e3 для en passant, сторона чёрных, счётчик 0
+    g.make_move(Move.double_pawn(4, 6, 4, 4))
+    check('FEN после 1.e4',
+          g.fen() == 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', g.fen())
+
+    # 1...c5: ep-цель c6 (чёрная пешка прошла двойным), ход белых, fullmove 2
+    g.make_move(Move.double_pawn(2, 1, 2, 3))
+    check('FEN после 1.e4 c5',
+          g.fen() == 'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2', g.fen())
+
+    # PGN содержит ходы и результат '*' (партия не окончена)
+    pgn = g.pgn()
+    check('PGN содержит 1. e4', '1. e4 c5' in pgn, pgn)
+    check('PGN результат *', '[Result "*"]' in pgn and pgn.rstrip().endswith('*'), pgn)
+
+    # Рокировка снимает права: белая короткая — теряем только K
+    g2 = Game()
+    # Расчистим f1/g1 и подведём ладью/короля к рокировке через прямой ход
+    # проще — сразу из позиции с пустыми f1,g1 и правом O-O
+    field = Field.empty()
+    field.set_piece(4, 7, PieceType.KING, SideType.WHITE)
+    field.set_piece(7, 7, PieceType.ROOK, SideType.WHITE)
+    field.set_piece(4, 0, PieceType.KING, SideType.BLACK)
+    g3 = Game.from_position(field, side=SideType.WHITE,
+                            rights=R.CastlingRights(wk=True, wq=False, bk=False, bq=False))
+    check('FEN прав до рокировки: только K', g3.fen().split(' ')[2] == 'K', g3.fen())
+    castle = Move.castle(4, 7, 6, 7, 'K')
+    assert g3.make_move(castle)
+    check('FEN после O-O: прав нет (-)', g3.fen().split(' ')[2] == '-', g3.fen())
+    check('PGN после O-O содержит O-O', 'O-O' in g3.pgn())
+
+
+def test_from_fen():
+    print('Тест: загрузка позиции из FEN')
+    start = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    g = Game.from_fen(start)
+    check('from_fen стартовой: round-trip', g.fen() == start, g.fen())
+    check('from_fen стартовой: сторона белых', g.side_to_move == SideType.WHITE)
+    check('from_fen стартовой: 20 легальных ходов', len(g.legal_moves()) == 20)
+
+    # Kiwipete: round-trip + 48 легальных ходов (канон)
+    kiwi = 'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'
+    gk = Game.from_fen(kiwi)
+    check('from_fen Kiwipete: round-trip', gk.fen() == kiwi, gk.fen())
+    check('from_fen Kiwipete: 48 ходов', len(gk.legal_moves()) == 48, len(gk.legal_moves()))
+
+    # en passant-цель читается
+    after_e4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
+    ge = Game.from_fen(after_e4)
+    check('from_fen: ep-цель e3 читается', ge.en_passant_target is not None
+          and square_name(ge.en_passant_target.x, ge.en_passant_target.y) == 'e3', ge.fen())
+
+    # Статус вычисляется: детский мат (белые заматованы)
+    fool = 'rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3'
+    gf = Game.from_fen(fool)
+    check('from_fen: статус матовой позиции = checkmate', gf.status == 'checkmate', gf.status)
+
+    # Неверный FEN вызывает ValueError
+    raised = False
+    try:
+        Game.from_fen('not a fen')
+    except ValueError:
+        raised = True
+    check('from_fen: неверный FEN → ValueError', raised)
+
+    # Пешка на крайней горизонтали — невозможна (только превращение)
+    raised = False
+    try:
+        Game.from_fen('P3k3/8/8/8/8/8/8/4K3 w - - 0 1')
+    except ValueError:
+        raised = True
+    check('from_fen: пешка на a8 → ValueError', raised)
+
+    # Сторона без хода под шахом — нелегальная позиция
+    raised = False
+    try:
+        # белый ферзь e5 шахует чёрного короля e8, но ход белых
+        Game.from_fen('4k3/8/8/4Q3/8/8/8/4K3 w - - 0 1')
+    except ValueError:
+        raised = True
+    check('from_fen: сторона без хода под шахом → ValueError', raised)
+
+
+def test_from_pgn():
+    print('Тест: загрузка партии из PGN (from_san / from_pgn)')
+    # 1. Round-trip: сыграем координатами, экспорт PGN, импорт, сравним FEN и SAN
+    g = Game()
+    seq = ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1b5', 'a7a6', 'b5a4', 'g8f6', 'e1g1']
+    for uci in seq:
+        fx, fy = ord(uci[0]) - 97, 8 - int(uci[1])
+        tx, ty = ord(uci[2]) - 97, 8 - int(uci[3])
+        cand = [m for m in g.legal_moves()
+                if m.from_x == fx and m.from_y == fy and m.to_x == tx and m.to_y == ty]
+        assert cand, uci
+        g.make_move(cand[0])
+    g2 = Game.from_pgn(g.pgn())
+    check('from_pgn round-trip: FEN равны', g.fen() == g2.fen(), g2.fen())
+    check('from_pgn round-trip: SAN равны',
+          [h.san for h in g.history] == [h.san for h in g2.history],
+          [h.san for h in g2.history])
+    check('from_pgn: рокировка O-O в истории', 'O-O' in [h.san for h in g2.history])
+
+    # 2. Детский мат по PGN → checkmate, последний SAN Qh4#
+    fool = '[Event "x"]\n[White "A"]\n[Black "B"]\n[Result "0-1"]\n\n1. f3 e5 2. g4 Qh4# 0-1'
+    gf = Game.from_pgn(fool)
+    check('from_pgn: детский мат = checkmate', gf.status == 'checkmate', gf.status)
+    check('from_pgn: последний SAN Qh4#', gf.history[-1].san == 'Qh4#', gf.history[-1].san)
+
+    # 3. Комментарии, вложенный вариант, NAG, слитный номер хода
+    pgn3 = '1. e4 {отлично} e5 2. Nf3 (2. Bc4 Nc6) Nc6 $1 3.Bb5 a6 1-0'
+    g3 = Game.from_pgn(pgn3)
+    check('from_pgn: комментарии/варианты/NAG игнорируются',
+          [h.san for h in g3.history] == ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5', 'a6'],
+          [h.san for h in g3.history])
+
+    # 4. from_san поштучно
+    gs = Game()
+    check('from_san: e4', gs.from_san('e4').to_x == 4 and gs.from_san('e4').to_y == 4)
+    gs.make_move(gs.from_san('e4'))
+    gs.make_move(gs.from_san('e5'))
+    check('from_san: Nf3 (рыцарский прыжок)', gs.from_san('Nf3').to_x == 5 and gs.from_san('Nf3').to_y == 5)
+
+    # 5. Нелегальный ход в PGN → ValueError с номером хода
+    raised = False
+    try:
+        Game.from_pgn('1. e4 e5 2. Nxg8')
+    except ValueError:
+        raised = True
+    check('from_pgn: нелегальный ход → ValueError', raised)
+
+    # 6. Заголовок [FEN] — старт не со стандартной позиции
+    pgn_fen = ('[FEN "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3"]\n'
+               '\n1... Nf6 2. Nc3')   # нечётный ход чёрных
+    gfn = Game.from_pgn(pgn_fen)
+    check('from_pgn: старт по [FEN]', gfn.history[0].san == 'Nf6', gfn.history[0].san)
+    check('from_pgn: после [FEN] 2 полухода', len(gfn.history) == 2, len(gfn.history))
+
+
+def main():
+    print('=== Дымовой тест game.py ===\n')
+    test_fools_mate_via_game()
+    print()
+    test_undo_to_start()
+    print()
+    test_insufficient_material()
+    print()
+    test_50_move_rule()
+    print()
+    test_threefold_repetition()
+    print()
+    test_repetition_irrelevant_ep()
+    print()
+    test_san_disambiguation()
+    print()
+    test_fen_pgn()
+    print()
+    test_from_fen()
+    print()
+    test_from_pgn()
+    print(f'\n=== Итог: PASS={PASS}, FAIL={FAIL} ===')
+    sys.exit(0 if FAIL == 0 else 1)
+
+
+if __name__ == '__main__':
+    main()

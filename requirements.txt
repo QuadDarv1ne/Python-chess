@@ -1,0 +1,7 @@
+# Сторонних зависимостей нет — используется только стандартная библиотека Python.
+#
+# Требуется модуль tkinter (часть CPython, но на некоторых дистрибутивах ставится
+# отдельно). На Debian/Ubuntu: sudo apt install python3-tk
+# На Fedora: sudo dnf install python3-tkinter
+#
+# Python 3.10+
