@@ -41,6 +41,34 @@ class FakeStop:
         return self.waits >= 4
 
 
+class FakeTrackStop:
+    def __init__(self, manager):
+        self.manager = manager
+        self.tracks = []
+        self.waits = 0
+
+    def wait(self, _timeout):
+        self.waits += 1
+        self.tracks.append(self.manager.current_track)
+        if self.waits == 1:
+            self.manager.next_track()
+            return False
+        if self.waits == 2:
+            self.manager.previous_track()
+            return False
+        return self.waits >= 3
+
+
+class ImmediateStop:
+    def __init__(self, manager):
+        self.manager = manager
+        self.track = None
+
+    def wait(self, _timeout):
+        self.track = self.manager.current_track
+        return True
+
+
 def test_effect_ducks_and_restores_music():
     manager = audio.SoundManager()
     backend = FakeBackend()
@@ -69,5 +97,69 @@ def test_effect_ducks_and_restores_music():
     print('[PASS] music fades down on an effect and restores afterward')
 
 
+def test_playlist_navigation_and_shuffle():
+    manager = audio.SoundManager()
+    backend = FakeBackend()
+    manager._backend = backend
+    manager._music_enabled = True
+    manager._music_thread = None
+    manager.set_shuffle_music(True)
+    manager._music_rng.shuffle = lambda paths: paths.reverse()
+    stop = FakeTrackStop(manager)
+
+    with patch.object(
+        audio, 'list_music_files',
+        return_value=[Path('a.mp3'), Path('b.mp3'), Path('c.mp3')],
+    ):
+        manager._music_worker(stop, 50)
+
+    opened = [
+        command.split('"', 2)[1]
+        for command in backend.commands
+        if command.startswith('open "')
+    ]
+    assert stop.tracks == ['c', 'b', 'c'], stop.tracks
+    assert opened == ['c.mp3', 'b.mp3', 'c.mp3'], opened
+    assert manager.current_track is None
+    print('[PASS] shuffle order and previous/next navigation')
+
+
+def test_synthesized_track_name():
+    manager = audio.SoundManager()
+    backend = FakeBackend()
+    manager._backend = backend
+    stop = ImmediateStop(manager)
+
+    with patch.object(audio, 'list_music_files', return_value=[]):
+        with patch.object(audio, 'cached_wav', return_value=Path('fallback.wav')):
+            manager._music_worker(stop, 50)
+
+    assert stop.track == 'Фортепианная тема', stop.track
+    assert manager.current_track is None
+    print('[PASS] synthesized fallback has a readable current-track title')
+
+
+def test_synthesized_audio_quality():
+    click = audio._click(0.1, 280, 0.4, seed=1)
+    differences = [click[i] - click[i - 1] for i in range(1, len(click))]
+    roughness = (sum(value * value for value in differences) / len(differences)) ** 0.5
+    assert roughness < 0.05, roughness
+
+    for name in audio.EFFECT_NAMES:
+        peak = max(abs(value) for value in audio._GENERATORS[name]())
+        assert 0.7 <= peak <= 0.9, (name, peak)
+
+    loop = audio._fade(
+        audio._piano_loop(),
+        int(audio.MUSIC_SAMPLE_RATE * 0.03),
+    )
+    edge_slope = abs((loop[1] - loop[0]) - (loop[-1] - loop[-2]))
+    assert edge_slope < 1e-4, edge_slope
+    print('[PASS] filtered effects, safe peaks and smooth piano loop edges')
+
+
 if __name__ == '__main__':
     test_effect_ducks_and_restores_music()
+    test_playlist_navigation_and_shuffle()
+    test_synthesized_track_name()
+    test_synthesized_audio_quality()

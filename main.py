@@ -62,6 +62,8 @@ class ChessApp:
         self._sound_var = tk.BooleanVar(value=self.sound.enabled)
         self._music_var = tk.BooleanVar(value=self.sound.music_enabled)
         self._volume_var = tk.IntVar(value=self.sound.volume)
+        self._music_volume_var = tk.IntVar(value=self.sound.music_volume)
+        self._shuffle_var = tk.BooleanVar(value=self.sound.shuffle_music)
 
         self.selected = None          # (x, y) выбранной фигуры
         self._hover = None
@@ -139,14 +141,33 @@ class ChessApp:
         m_sound.add_checkbutton(label='Фоновая музыка\tCtrl+M',
                                 variable=self._music_var, command=self.on_music_toggle)
         m_sound.add_separator()
+        self._previous_track_index = m_sound.index('end') + 1
+        m_sound.add_command(label='Предыдущий трек', command=self.sound.previous_track)
+        self._next_track_index = m_sound.index('end') + 1
+        m_sound.add_command(label='Следующий трек', command=self.sound.next_track)
+        self._current_track_index = m_sound.index('end') + 1
+        m_sound.add_command(label='Сейчас играет: —', state=tk.DISABLED)
+        m_sound.add_checkbutton(label='Перемешивать плейлист',
+                                variable=self._shuffle_var, command=self.on_shuffle_toggle)
+        m_sound.add_separator()
+
         m_vol = tk.Menu(m_sound, tearoff=0)
         for vol, label in ((30, 'Низкая'), (50, 'Средняя'), (75, 'Высокая'), (100, 'Максимальная')):
             m_vol.add_radiobutton(label=label, value=vol, variable=self._volume_var,
                                   command=self.on_volume_change)
-        m_sound.add_cascade(label='Громкость', menu=m_vol)
+        m_sound.add_cascade(label='Громкость эффектов', menu=m_vol)
+
+        m_music_vol = tk.Menu(m_sound, tearoff=0)
+        for vol, label in ((0, 'Без звука'), (25, 'Низкая'), (45, 'Средняя'),
+                           (70, 'Высокая'), (100, 'Максимальная')):
+            m_music_vol.add_radiobutton(label=label, value=vol, variable=self._music_volume_var,
+                                        command=self.on_music_volume_change)
+        m_sound.add_cascade(label='Громкость музыки', menu=m_music_vol)
+        self._sound_menu = m_sound
         menubar.add_cascade(label='Звук', menu=m_sound)
 
         self.root.config(menu=menubar)
+        self.root.after(500, self._refresh_music_menu)
 
     def _build_layout(self):
         frame = tk.Frame(self.root)
@@ -730,8 +751,28 @@ class ChessApp:
         self.sound.toggle_music()
         self._music_var.set(self.sound.music_enabled)
 
+    def on_shuffle_toggle(self):
+        self.sound.set_shuffle_music(self._shuffle_var.get())
+
     def on_volume_change(self):
         self.sound.set_volume(self._volume_var.get())
+
+    def on_music_volume_change(self):
+        self.sound.set_music_volume(self._music_volume_var.get())
+
+    def _refresh_music_menu(self):
+        track = self.sound.current_track or '—'
+        self._music_var.set(self.sound.music_enabled)
+        self._sound_menu.entryconfigure(
+            self._current_track_index, label=f'Сейчас играет: {track}')
+        nav_state = (
+            tk.NORMAL
+            if self.sound.music_enabled and self.sound.music_track_navigation_available
+            else tk.DISABLED
+        )
+        self._sound_menu.entryconfigure(self._previous_track_index, state=nav_state)
+        self._sound_menu.entryconfigure(self._next_track_index, state=nav_state)
+        self.root.after(500, self._refresh_music_menu)
 
     def toggle_flip(self):
         self.flipped = not self.flipped

@@ -13,6 +13,7 @@ from __future__ import annotations
 import array
 import math
 import os
+import queue
 import random
 import sys
 import tempfile
@@ -26,7 +27,7 @@ SAMPLE_RATE = 44100
 MUSIC_SAMPLE_RATE = 22050
 
 # Версия синтеза: при изменении алгоритмов старый кэш игнорируется
-SYNTH_VERSION = 1
+SYNTH_VERSION = 2
 
 # Каталог кэша
 CACHE_DIR = Path(tempfile.gettempdir()) / 'python-chess-audio'
@@ -89,7 +90,7 @@ def _fade(samples: list[float], edge: int) -> list[float]:
     n = len(samples)
     edge = min(edge, n // 2)
     for i in range(edge):
-        factor = i / edge
+        factor = 0.5 - 0.5 * math.cos(math.pi * i / edge)
         samples[i] *= factor
         samples[n - 1 - i] *= factor
     return samples
@@ -128,7 +129,8 @@ def _piano_key(
 
     # Частоты и веса гармоник (чем выше, тем быстрее затухает)
     harmonics = [
-        (1.0, 1.0),
+        (1.0, 0.86),
+        (1.0015, 0.22),
         (2.0, 0.4),
         (3.0, 0.18),
         (4.0, 0.08),
@@ -138,7 +140,10 @@ def _piano_key(
     steps = [2 * math.pi * freq * h for h, _ in harmonics]
     weights = [w for _, w in harmonics]
     # Скорость затухания каждой гармоники (1 = медленно, 8 = очень быстро)
-    decay_rates = [decay, decay * 2.5, decay * 5, decay * 8, decay * 12, decay * 18]
+    decay_rates = [
+        decay, decay * 1.03, decay * 2.5, decay * 5,
+        decay * 8, decay * 12, decay * 18,
+    ]
 
     samples = [0.0] * count
     for i in range(count):
@@ -185,13 +190,19 @@ def _click(duration: float, pitch: float, noise: float, seed: int) -> list[float
     count = int(SAMPLE_RATE * duration)
     step = 2 * math.pi * pitch / SAMPLE_RATE
     step_high = 2 * math.pi * pitch * 2.7 / SAMPLE_RATE
+    noise_alpha = 1.0 - math.exp(-2 * math.pi * 3200 / SAMPLE_RATE)
 
     samples = [0.0] * count
+    filtered_noise = 0.0
     for i in range(count):
         t = i / SAMPLE_RATE
         envelope = math.exp(-t * 40)
-        body = math.sin(step * i) * 0.7 + math.sin(step_high * i) * 0.25
-        grain = (rnd.random() * 2 - 1) * noise
+        body = (math.sin(step * i) * 0.7 +
+                math.sin(step_high * i) * 0.25 +
+                math.sin(step * 4.4 * i) * 0.10)
+        white_noise = rnd.random() * 2 - 1
+        filtered_noise += noise_alpha * (white_noise - filtered_noise)
+        grain = filtered_noise * noise
         samples[i] = (body + grain) * envelope
     return samples
 
@@ -212,7 +223,7 @@ def _effect_capture() -> list[float]:
 
 def _effect_promote() -> list[float]:
     """Три восходящих пианинных тона — превращение пешки."""
-    notes = (659.25, 783.99, 1046.50)  # C5 E5 G5
+    notes = (523.25, 659.25, 783.99)  # C5 E5 G5
     tracks = [_shift(_piano_key(f, 0.5, 0.25, decay=3.0), i * 0.10)
               for i, f in enumerate(notes)]
     return _normalize(_mix(*tracks), 0.85)
@@ -332,7 +343,7 @@ def cached_wav(name: str, volume: int) -> Path | None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         _write_wav(target, generator(), int(volume) / 100,
-                   rate=rate, fade_ms=0.0 if name == 'music' else 1.5)
+                   rate=rate, fade_ms=30.0 if name == 'music' else 1.5)
     except (OSError, ValueError, wave.Error):
         return None
     return target
@@ -416,6 +427,10 @@ class SoundManager:
 
         self._music_thread = None
         self._music_stop = None
+        self._music_commands: queue.Queue[int] = queue.Queue()
+        self._current_track: str | None = None
+        self._shuffle_music = False
+        self._music_rng = random.Random()
         # Для «умного распределения»: момент последнего эффекта (ducking)
         self._last_effect_at = 0.0
         self._music_state_lock = threading.Lock()
@@ -501,6 +516,25 @@ class SoundManager:
     # -- Музыка --
 
     @property
+    def music_volume(self) -> int:
+        with self._music_state_lock:
+            return self._music_volume
+
+    @property
+    def current_track(self) -> str | None:
+        with self._music_state_lock:
+            return self._current_track
+
+    @property
+    def shuffle_music(self) -> bool:
+        with self._music_state_lock:
+            return self._shuffle_music
+
+    @property
+    def music_track_navigation_available(self) -> bool:
+        return len(list_music_files()) > 1
+
+    @property
     def music_available(self) -> bool:
         if self._backend is None or not getattr(self._backend, 'supports_music', False):
             return False
@@ -530,9 +564,27 @@ class SoundManager:
     def toggle_music(self):
         self.set_music_enabled(not self._music_enabled)
 
+    def set_shuffle_music(self, enabled: bool):
+        with self._music_state_lock:
+            self._shuffle_music = bool(enabled)
+
+    def next_track(self):
+        self._request_track(1)
+
+    def previous_track(self):
+        self._request_track(-1)
+
+    def _request_track(self, offset: int):
+        if self._music_enabled and self.music_track_navigation_available:
+            self._music_commands.put(offset)
+
     def _start_music(self):
         if self._music_thread is not None:
             return
+        while not self._music_commands.empty():
+            self._music_commands.get_nowait()
+        with self._music_state_lock:
+            self._current_track = None
         self._music_stop = threading.Event()
         self._music_thread = threading.Thread(
             target=self._music_worker,
@@ -546,11 +598,13 @@ class SoundManager:
         stop = self._music_stop
         self._music_stop = None
         self._music_thread = None
+        with self._music_state_lock:
+            self._current_track = None
         if stop is not None:
             stop.set()
 
     def _music_worker(self, stop: threading.Event, volume: int):
-        """Фоновая музыка: плейлист mp3 из assets/music/ по кругу.
+        """Фоновая музыка с управлением плейлистом из музыкального потока.
 
         Если пользовательских файлов нет — играет синтезированную фортепианную
         тему (WAV). Все команды MCI выполняются только в этом потоке: алиас
@@ -563,6 +617,10 @@ class SoundManager:
 
         alias = f'chess_music_{os.getpid()}'
         current_mci_volume = None
+
+        def set_current_track(track: str | None):
+            with self._music_state_lock:
+                self._current_track = track
 
         def apply_music_volume():
             nonlocal current_mci_volume
@@ -581,40 +639,77 @@ class SoundManager:
                 current_mci_volume = max(current_mci_volume - FADE_STEP, target)
             mci(f'setaudio {alias} volume to {int(current_mci_volume)}')
 
-        def open_play(path: Path, mpeg: bool) -> bool:
+        def open_play(path: Path, mpeg: bool, title: str | None = None) -> bool:
             """Переоткрыть алиас на новый файл и запустить воспроизведение."""
+            set_current_track(None)
             mci(f'close {alias}')
             type_part = ' type mpegvideo' if mpeg else ' type waveaudio'
             code, _ = mci(f'open "{path}"{type_part} alias {alias}')
             if code != 0:
                 return False
             apply_music_volume()
-            return mci(f'play {alias} from 0')[0] == 0
+            if mci(f'play {alias} from 0')[0] != 0:
+                return False
+            set_current_track(title or path.stem)
+            return True
 
         playlist = list_music_files()
         if playlist:
-            # Пользовательская музыка: прокручиваем треки по кругу
+            with self._music_state_lock:
+                shuffle_active = self._shuffle_music
+            play_order = playlist.copy()
+            if shuffle_active:
+                self._music_rng.shuffle(play_order)
             idx = 0
-            if not open_play(playlist[idx], mpeg=True):
+            if not open_play(play_order[idx], mpeg=True):
                 self._music_enabled = False
+                set_current_track(None)
                 return
             while not stop.wait(MUSIC_POLL):
                 apply_music_volume()
+                with self._music_state_lock:
+                    shuffle_now = self._shuffle_music
+                if shuffle_now != shuffle_active:
+                    current = play_order[idx]
+                    if shuffle_now:
+                        remaining = [path for path in playlist if path != current]
+                        self._music_rng.shuffle(remaining)
+                        play_order = [current, *remaining]
+                        idx = 0
+                    else:
+                        play_order = playlist.copy()
+                        idx = play_order.index(current)
+                    shuffle_active = shuffle_now
+
+                offset = 0
+                while True:
+                    try:
+                        offset += self._music_commands.get_nowait()
+                    except queue.Empty:
+                        break
+                if offset:
+                    idx = (idx + offset) % len(play_order)
+                    if not open_play(play_order[idx], mpeg=True):
+                        break
+                    continue
+
                 code, mode = mci(f'status {alias} mode')
                 if code != 0:
                     break
                 if mode.strip() == 'stopped':
-                    idx = (idx + 1) % len(playlist)
-                    if not open_play(playlist[idx], mpeg=True):
+                    idx = (idx + 1) % len(play_order)
+                    if not open_play(play_order[idx], mpeg=True):
                         break
             mci(f'stop {alias}')
             mci(f'close {alias}')
+            set_current_track(None)
             return
 
         # Резерв: синтезированная фортепианная тема (WAV, зацикленный вручную)
         path = cached_wav('music', volume)
-        if path is None or not open_play(path, mpeg=False):
+        if path is None or not open_play(path, mpeg=False, title='Фортепианная тема'):
             self._music_enabled = False
+            set_current_track(None)
             return
         while not stop.wait(MUSIC_POLL):
             apply_music_volume()
@@ -624,3 +719,6 @@ class SoundManager:
             if mode.strip() == 'stopped':
                 if not open_play(path, mpeg=False):
                     break
+        mci(f'stop {alias}')
+        mci(f'close {alias}')
+        set_current_track(None)
