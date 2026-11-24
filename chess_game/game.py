@@ -26,6 +26,8 @@ ACTIVE = {'normal', 'check'}
 # Ничьи
 DRAWS = {'stalemate', 'draw_50', 'draw_repetition', 'draw_insufficient'}
 
+_STANDARD_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+
 _STATUS_RU = {
     'normal': 'Игра идёт',
     'check': 'Шах!',
@@ -35,6 +37,16 @@ _STATUS_RU = {
     'draw_repetition': 'Ничья (троекратное повторение)',
     'draw_insufficient': 'Ничья (недостаточный материал)',
 }
+
+
+def _fen_counter(token: str, name: str, minimum: int) -> int:
+    '''Числовое поле FEN. Неверный текст не подменяется нулём.'''
+    if not token.isdigit():
+        raise ValueError(f'некорректный {name} в FEN: {token!r}')
+    value = int(token)
+    if value < minimum:
+        raise ValueError(f'{name} в FEN не может быть меньше {minimum}: {token!r}')
+    return value
 
 
 def square_name(x: int, y: int) -> str:
@@ -79,20 +91,26 @@ def parse_fen(fen: str):
         else:
             raise ValueError(f'некорректная клетка en passant в FEN: {s!r}')
 
-    halfmove = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-    fullmove = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 1
+    halfmove = _fen_counter(parts[4], 'счётчик полуходов', 0) if len(parts) > 4 else 0
+    fullmove = _fen_counter(parts[5], 'номер хода', 1) if len(parts) > 5 else 1
 
     field = Field.empty()
     y = 0
     x = 0
     for ch in placement:
         if ch == '/':
+            if x != 8:
+                raise ValueError(f'горизонталь {8 - y} в FEN не из 8 клеток: {placement!r}')
             y += 1
             x = 0
             if y >= 8:
                 raise ValueError(f'слишком много горизонталей в FEN: {placement!r}')
         elif ch.isdigit():
+            if ch == '0':
+                raise ValueError(f'нулевая пустая клетка в FEN: {placement!r}')
             x += int(ch)
+            if x > 8:
+                raise ValueError(f'слишком длинная горизонталь в FEN: {placement!r}')
         elif ch in _FEN_PIECES:
             if x >= 8:
                 raise ValueError(f'слишком длинная горизонталь в FEN: {placement!r}')
@@ -101,6 +119,8 @@ def parse_fen(fen: str):
             x += 1
         else:
             raise ValueError(f'неизвестный символ в FEN: {ch!r}')
+    if x != 8:
+        raise ValueError(f'горизонталь {8 - y} в FEN не из 8 клеток: {placement!r}')
     if y != 7:
         raise ValueError(f'ожидалось 8 горизонталей в FEN, получено {y + 1}')
     # У каждой стороны должен быть ровно один король — иначе позиция некорректна
@@ -126,7 +146,59 @@ def parse_fen(fen: str):
     if R.in_check(field, SideType.opposite(side)):
         raise ValueError(f'в FEN сторона без хода под шахом — позиция нелегальна: '
                          f'{fen!r}')
+    _validate_castling(field, rights)
+    _validate_en_passant(field, side, ep)
     return field, side, rights, ep, halfmove, fullmove
+
+
+def _validate_castling(field: Field, rights: R.CastlingRights):
+    '''Права рокировки возможны только с королём и ладьёй на исходных клетках.'''
+    checks = (
+        (rights.wk or rights.wq, 4, 7, SideType.WHITE, 'белых'),
+        (rights.bk or rights.bq, 4, 0, SideType.BLACK, 'чёрных'),
+    )
+    for needed, kx, ky, color, name in checks:
+        if not needed:
+            continue
+        king = field.at(kx, ky)
+        if king.type != PieceType.KING or king.color != color:
+            raise ValueError(f'права рокировки {name} без короля на '
+                             f'{square_name(kx, ky)}')
+    rooks = (
+        (rights.wk, 7, 7, SideType.WHITE, 'K'),
+        (rights.wq, 0, 7, SideType.WHITE, 'Q'),
+        (rights.bk, 7, 0, SideType.BLACK, 'k'),
+        (rights.bq, 0, 0, SideType.BLACK, 'q'),
+    )
+    for flag, rx, ry, color, tag in rooks:
+        if not flag:
+            continue
+        rook = field.at(rx, ry)
+        if rook.type != PieceType.ROOK or rook.color != color:
+            raise ValueError(f'право рокировки {tag} без ладьи на '
+                             f'{square_name(rx, ry)}')
+
+
+def _validate_en_passant(field: Field, side: SideType, ep: Point):
+    '''Клетка en passant — пустая, на 3-й/6-й горизонтали, за ней пешка двойного хода.'''
+    if ep is None:
+        return
+    if side == SideType.WHITE:
+        if ep.y != 2:
+            raise ValueError(f'en passant при ходе белых только на 6-й горизонтали, '
+                             f'получено {square_name(ep.x, ep.y)}')
+        pawn_y, pawn_color = 3, SideType.BLACK
+    else:
+        if ep.y != 5:
+            raise ValueError(f'en passant при ходе чёрных только на 3-й горизонтали, '
+                             f'получено {square_name(ep.x, ep.y)}')
+        pawn_y, pawn_color = 4, SideType.WHITE
+    if not field.at(ep.x, ep.y).is_empty:
+        raise ValueError(f'клетка en passant {square_name(ep.x, ep.y)} занята')
+    pawn = field.at(ep.x, pawn_y)
+    if pawn.type != PieceType.PAWN or pawn.color != pawn_color:
+        raise ValueError(f'нет пешки двойного хода за клеткой en passant '
+                         f'{square_name(ep.x, ep.y)}')
 
 
 # --- Разбор SAN (для импорта PGN) -------------------------------------------
@@ -142,25 +214,36 @@ _SAN_MOVE_RE = re.compile(
     r'(?P<ff>[a-h])?(?P<fr>[1-8])?'
     r'(?P<cap>x)?'
     r'(?P<tf>[a-h])(?P<tr>[1-8])'
-    r'(?:=(?P<promo>[NBRQ]))?$'
+    r'(?:=?(?P<promo>[NBRQ]))?$'
 )
 
 
 def _strip_pgn_movetext(text: str) -> str:
-    '''Убрать из текста ходов комментарии {...}, вложенные варианты (...) и
-    оставить только верхний уровень (сами ходы и номера).'''
+    '''Убрать из текста ходов комментарии {...}, «;» до конца строки, строки «%»,
+    вложенные варианты (...) и оставить только верхний уровень.'''
     out = []
     depth = 0
     i, n = 0, len(text)
+    line_start = True
     while i < n:
         ch = text[i]
-        if ch == '{':
+        if depth == 0 and ch == '{':
             j = text.find('}', i)
             i = j + 1 if j != -1 else n
+            line_start = False
+            continue
+        if depth == 0 and ch == ';':
+            j = text.find('\n', i)
+            i = n if j == -1 else j
+            continue
+        if depth == 0 and line_start and ch == '%':
+            j = text.find('\n', i)
+            i = n if j == -1 else j
             continue
         if ch == '(':
             depth += 1
             i += 1
+            line_start = False
             continue
         if ch == ')' and depth > 0:
             depth -= 1
@@ -168,8 +251,26 @@ def _strip_pgn_movetext(text: str) -> str:
             continue
         if depth == 0:
             out.append(ch)
+        if ch == '\n':
+            line_start = True
+        elif not ch.isspace():
+            line_start = False
         i += 1
     return ''.join(out)
+
+
+def _first_pgn_game(pgn_text: str) -> str:
+    '''Текст только первой партии. Следующий заголовок «[» после ходов начинает новую.'''
+    kept = []
+    seen_body = False
+    for line in pgn_text.splitlines():
+        stripped = line.strip()
+        if seen_body and stripped.startswith('['):
+            break
+        kept.append(line)
+        if stripped and not stripped.startswith('['):
+            seen_body = True
+    return '\n'.join(kept)
 
 
 def _tokenize_pgn(text: str) -> list:
@@ -285,6 +386,7 @@ class Game:
         self.__history = []
         self.__rep_keys = []
         self.__rep_counter = Counter()
+        self.__start_fen = None
         self.__record_position()
 
     @classmethod
@@ -309,8 +411,10 @@ class Game:
         game._Game__history = []
         game._Game__rep_keys = []
         game._Game__rep_counter = Counter()
+        game._Game__start_fen = None
         game._Game__record_position()
         game._Game__status = game._Game__compute_status()
+        game._Game__start_fen = game.fen()
         return game
 
     @classmethod
@@ -339,6 +443,7 @@ class Game:
         ходов и результат. Каждый SAN-токен сопоставляется с легальным ходом
         через from_san. При невозможном ходе — ValueError с номером хода.
         '''
+        pgn_text = _first_pgn_game(pgn_text)
         # Заголовки [Key "Value"]
         headers = dict(re.findall(r'\[(\w+)\s+"([^"]*)"\]', pgn_text))
         # Тело без строк-заголовков
@@ -399,8 +504,11 @@ class Game:
 
         Перед применением ход проверяется на легальность, чтобы UI и движок
         не могли провести нелегальный ход (движок возвращает всегда легальный,
-        но проверка дешёвая и страхует от багов).
+        но проверка дешёвая и страхует от багов). После мата или ничьей
+        партия не продолжается, даже если на доске ещё есть геометрические ходы.
         '''
+        if self.is_game_over:
+            return False
         legal = self.legal_moves()
         if move not in legal:
             # Сравнение по содержимому: найдём совпадающий, чтобы взять «канонический»
@@ -598,10 +706,12 @@ class Game:
         '''Найти легальный ход по строке SAN в текущей позиции.
 
         Поддерживает рокировку (O-O / 0-0), взятия, разыменование по файлу/рангу,
-        превращение (=Q/R/B/N) и суффиксы +/#!/? (игнорируются). Возвращает
+        превращение (=Q или Q), суффиксы +/#!/? и приклеенный NAG ($1). Возвращает
         единственный совпавший ход; при отсутствии или неоднозначности — ValueError.
         '''
-        s = san.strip().rstrip('+#!?')
+        s = san.strip()
+        s = re.sub(r'\$\d+$', '', s)   # NAG, приклеенный к ходу: «e4$1»
+        s = s.rstrip('+#!?')
         # Рокировка (допускаем и «0» вместо «O»)
         if s in ('O-O', '0-0'):
             for m in self.legal_moves():
@@ -650,9 +760,7 @@ class Game:
             return matches[0]
         if not matches:
             raise ValueError(f'нет легального хода для SAN {san!r}')
-        # Несколько совпадений — SAN неоднозначен; берём первый (на корректном
-        # PGN из to_san это не случается: разыменование делает ход однозначным).
-        return matches[0]
+        raise ValueError(f'SAN {san!r} неоднозначен ({len(matches)} легальных совпадений)')
 
     # -- Для UI: итог по партии --
 
@@ -671,13 +779,26 @@ class Game:
         return f'Ход {self.__side_to_move.name_ru.lower()}'
 
     def move_list_text(self) -> list:
-        '''Список строк «1. e4 e5» для панели истории'''
+        '''Список строк «1. e4 e5» для панели истории.
+
+        Если партия начата с хода чёрных, первая строка — «3... Nf6», а не
+        «3. Nf6»: иначе ход чёрных выглядит ходом белых.
+        '''
         lines = []
-        for i in range(0, len(self.__history), 2):
-            num = self.__history[i].move_number
-            white = self.__history[i].san
-            black = self.__history[i + 1].san if i + 1 < len(self.__history) else ''
-            lines.append(f'{num}. {white} {black}'.rstrip())
+        hist = self.__history
+        i = 0
+        if hist and hist[0].side == SideType.BLACK:
+            lines.append(f'{hist[0].move_number}... {hist[0].san}')
+            i = 1
+        while i < len(hist):
+            num = hist[i].move_number
+            white = hist[i].san
+            if i + 1 < len(hist) and hist[i + 1].side == SideType.BLACK:
+                lines.append(f'{num}. {white} {hist[i + 1].san}')
+                i += 2
+            else:
+                lines.append(f'{num}. {white}')
+                i += 1
         return lines
 
     # -- Сериализация позиции и партии --
@@ -744,6 +865,9 @@ class Game:
             f'[Black "{black_name}"]',
             f'[Result "{self.result_pgn()}"]',
         ]
+        if self.__start_fen and self.__start_fen != _STANDARD_FEN:
+            headers.append('[SetUp "1"]')
+            headers.append(f'[FEN "{self.__start_fen}"]')
         # Текст ходов: «1. e4 e5 2. Nf3 ...» с переносами для читаемости
         movetext = '  '.join(self.move_list_text())
         if not movetext:

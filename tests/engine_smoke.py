@@ -67,6 +67,19 @@ def test_eval_and_aspiration():
     print(f'  [PASS] аспирация: depth={r1.depth}, ход={r1.move}, '
           f'детерминирован, узлов={r1.nodes}\n')
 
+    # Правило 50 ходов внутри поиска: K vs K, halfmove=99, глубина 1.
+    # Любой ход доводит счётчик до 100, и у чёрных нет шаха — оценка 0,
+    # а не позиционная разница королей.
+    bare = Field.empty()
+    bare.set_piece(0, 7, PieceType.KING, SideType.WHITE)
+    bare.set_piece(7, 0, PieceType.KING, SideType.BLACK)
+    draw_eng = Engine(max_depth=1, time_limit=None, noise_scale=0.0)
+    draw_res = draw_eng.search(bare, SideType.WHITE, R.CastlingRights(False, False, False, False),
+                               None, halfmove=99)
+    assert draw_res.move is not None, 'при halfmove=99 ход всё ещё выбирается'
+    assert draw_res.score == 0.0, f'ожидалась ничья по 50 ходам, score={draw_res.score}'
+    print('  [PASS] правило 50 ходов внутри поиска: score=0')
+
 
 def main():
     print('=== Дымовой тест движка ===\n')

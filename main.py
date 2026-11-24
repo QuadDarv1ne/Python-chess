@@ -57,6 +57,7 @@ class ChessApp:
         self.game = Game(player_side=self.player_side, difficulty=self.difficulty)
 
         self.selected = None          # (x, y) выбранной фигуры
+        self._hover = None
         self.flipped = (self.player_side == SideType.BLACK)
         self.last_move = None         # Move для подсветки
         self.thinking = False
@@ -106,17 +107,19 @@ class ChessApp:
         m_game.add_command(label='Выйти', command=self._on_close)
         menubar.add_cascade(label='Игра', menu=m_game)
 
+        self._side_var = tk.StringVar(value=self.player_side.name)
         m_side = tk.Menu(menubar, tearoff=0)
         for side, name in ((SideType.WHITE, 'За белых'),
                            (SideType.BLACK, 'За чёрных')):
             m_side.add_radiobutton(label=name, value=side.name,
-                                   var=self._mk_side_var(), command=self.on_side_change)
+                                   var=self._side_var, command=self.on_side_change)
         menubar.add_cascade(label='Сторона', menu=m_side)
 
+        self._diff_var = tk.StringVar(value=self.difficulty.name)
         m_diff = tk.Menu(menubar, tearoff=0)
         for d in DIFFICULTY_ORDER:
             m_diff.add_radiobutton(label=d.name_ru, value=d.name,
-                                   var=self._mk_diff_var(), command=self.on_difficulty_change)
+                                   var=self._diff_var, command=self.on_difficulty_change)
         menubar.add_cascade(label='Сложность', menu=m_diff)
 
         m_view = tk.Menu(menubar, tearoff=0)
@@ -124,16 +127,6 @@ class ChessApp:
         menubar.add_cascade(label='Вид', menu=m_view)
 
         self.root.config(menu=menubar)
-
-    def _mk_side_var(self):
-        v = tk.StringVar(value=self.player_side.name)
-        self._side_var = v
-        return v
-
-    def _mk_diff_var(self):
-        v = tk.StringVar(value=self.difficulty.name)
-        self._diff_var = v
-        return v
 
     def _build_layout(self):
         frame = tk.Frame(self.root)
@@ -160,12 +153,12 @@ class ChessApp:
         self.material_var = tk.StringVar(value='')
         tk.Label(side, textvariable=self.material_var,
                  font=('DejaVu Sans', 11), wraplength=220, justify=tk.LEFT,
-                 fg='#e7cfa9').pack(anchor='w', pady=(0, 2))
+                 fg='#3a2a1a').pack(anchor='w', pady=(0, 2))
         # Строка главного варианта (PV) из подсказки
         self.pv_var = tk.StringVar(value='')
         self.pv_label = tk.Label(side, textvariable=self.pv_var,
                                  font=('DejaVu Sans Mono', 9), wraplength=220,
-                                 justify=tk.LEFT, fg='#9bb0c9')
+                                 justify=tk.LEFT, fg='#1e3a5f')
         self.pv_label.pack(anchor='w', pady=(0, 8))
 
         tk.Label(side, text='Ходы:', font=('DejaVu Sans', 10, 'bold')).pack(anchor='w')
@@ -192,6 +185,7 @@ class ChessApp:
         self.root.bind('<Control-H>', lambda e: self.show_hint())
         self.root.bind('<Control-f>', lambda e: self.toggle_flip())
         self.root.bind('<Control-F>', lambda e: self.toggle_flip())
+        self.root.bind('<Escape>', lambda e: self._clear_selection())
 
     # -- Координаты --
 
@@ -241,8 +235,8 @@ class ChessApp:
                 sx, sy = self.board_to_screen(lx, ly)
                 self._draw_thick_outline(sx, sy, LAST_MOVE_COLOR, 4)
 
-        # Подсветка короля под шахом
-        if self.game.status == 'check':
+        # Подсветка короля под шахом и в мате
+        if self.game.status in ('check', 'checkmate'):
             kpos = self.game.field.king_position(self.game.side_to_move)
             if kpos:
                 sx, sy = self.board_to_screen(kpos[0], kpos[1])
@@ -278,20 +272,21 @@ class ChessApp:
             sx, sy = self.board_to_screen(*self._hover)
             self._draw_thick_outline(sx, sy, HOVER_BORDER_COLOR, 2)
 
-        # Фигуры (с пропуском клетки, которую сейчас «везёт» анимация)
-        skip = self._anim['skip'] if self._anim else None
+        # Фигуры (пропускаем клетки, которые сейчас «везёт» анимация)
+        skip = self._anim['skip'] if self._anim else ()
         for x, y, piece in self.game.field.pieces():
-            if skip is not None and (x, y) == skip:
+            if (x, y) in skip:
                 continue
             self._draw_piece(x, y, piece)
 
-        # Анимируемая фигура в промежуточной позиции
+        # Анимируемые фигуры (король и, при рокировке, ладья)
         if self._anim is not None:
             a = self._anim
             t = a['t']
-            cx = a['from_cx'] + (a['to_cx'] - a['from_cx']) * t
-            cy = a['from_cy'] + (a['to_cy'] - a['from_cy']) * t
-            self._draw_glyph(cx, cy, a['glyph'], a['outline'], a['fill'])
+            for part in a['parts']:
+                cx = part['from_cx'] + (part['to_cx'] - part['from_cx']) * t
+                cy = part['from_cy'] + (part['to_cy'] - part['from_cy']) * t
+                self._draw_glyph(cx, cy, part['glyph'], part['outline'], part['fill'])
 
         # Координаты
         for i in range(BOARD_SIZE):
@@ -340,26 +335,41 @@ class ChessApp:
         назначения (для превращения это уже новая фигура — поэтому подменяем
         глиф на пешку, чтобы анимировался именно пешечный ход).
         '''
-        if self._anim is not None:
-            # На всякий случай: завершаем предыдущую анимацию сразу
-            self._anim['t'] = 1.0
-        fx, fy = self._center_of(move.from_x, move.from_y)
-        tx, ty = self._center_of(move.to_x, move.to_y)
         landed = self.game.field.at(move.to_x, move.to_y)
         color = landed.color
         ptype = PieceType.PAWN if move.is_promotion else landed.type
-        glyph = PIECE_GLYPHS.get((color, ptype), '')
+        parts = [self._anim_part(move.from_x, move.from_y, move.to_x, move.to_y,
+                                 color, ptype)]
+        skip = {(move.to_x, move.to_y)}
+        if move.is_castle:
+            y = move.from_y
+            if move.castle_side == 'K':
+                rfrom, rto = (7, y), (5, y)
+            else:
+                rfrom, rto = (0, y), (3, y)
+            rook = self.game.field.at(*rto)
+            parts.append(self._anim_part(rfrom[0], rfrom[1], rto[0], rto[1],
+                                         rook.color, PieceType.ROOK))
+            skip.add(rto)
+        self._anim = {
+            'parts': parts,
+            'skip': skip,
+            't': 0.0, 'start': perf_counter(), 'after': after,
+        }
+        self._anim_step()
+
+    def _anim_part(self, fx, fy, tx, ty, color, ptype):
+        scx, scy = self._center_of(fx, fy)
+        tcx, tcy = self._center_of(tx, ty)
         if color == SideType.WHITE:
             outline_c, fill_c = '#1a1a1a', '#f6f3ee'
         else:
             outline_c, fill_c = '#d8d8d8', '#161616'
-        self._anim = {
-            'from_cx': fx, 'from_cy': fy, 'to_cx': tx, 'to_cy': ty,
-            'glyph': glyph, 'outline': outline_c, 'fill': fill_c,
-            'skip': (move.to_x, move.to_y),
-            't': 0.0, 'start': perf_counter(), 'after': after,
+        return {
+            'from_cx': scx, 'from_cy': scy, 'to_cx': tcx, 'to_cy': tcy,
+            'glyph': PIECE_GLYPHS.get((color, ptype), ''),
+            'outline': outline_c, 'fill': fill_c,
         }
-        self._anim_step()
 
     def _anim_step(self):
         if self._anim is None:
@@ -378,8 +388,6 @@ class ChessApp:
 
     # -- Взаимодействие --
 
-    _hover = None
-
     def _set_hover(self, pos):
         if self._anim is not None:
             return
@@ -390,6 +398,12 @@ class ChessApp:
     def on_motion(self, event):
         pos = self.screen_to_board(event.x, event.y)
         self._set_hover(pos)
+
+    def _clear_selection(self):
+        if self.selected is None or self._anim is not None:
+            return
+        self.selected = None
+        self.render()
 
     def on_click(self, event):
         if self.thinking or self._anim is not None or self.game.is_game_over:
@@ -498,7 +512,8 @@ class ChessApp:
 
         def work():
             res = engine.search(field_copy, side, rights, ep,
-                                rep_keys=self.game.repetition_keys())
+                                rep_keys=self.game.repetition_keys(),
+                                halfmove=self.game.halfmove_clock)
             # Не трогаем Tk из потока — только кладём результат в очередь
             self._result_queue.put((res, cancel, side))
 
@@ -576,7 +591,8 @@ class ChessApp:
 
         def work():
             res = engine.search(field_copy, side, rights, ep,
-                                rep_keys=self.game.repetition_keys())
+                                rep_keys=self.game.repetition_keys(),
+                                halfmove=self.game.halfmove_clock)
             self._result_queue.put(('hint', res, cancel, side))
 
         threading.Thread(target=work, daemon=True).start()
@@ -632,6 +648,7 @@ class ChessApp:
         self.update_status()
         self.update_history()
         self.update_material()
+        self.maybe_ai_move()
 
     def on_difficulty_change(self):
         try:

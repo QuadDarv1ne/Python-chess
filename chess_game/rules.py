@@ -253,6 +253,9 @@ def _castle_moves(field: Field, side: SideType, rights: CastlingRights) -> list:
     if side == SideType.WHITE:
         y = 7
         enemy = SideType.BLACK
+        king = field.at(4, y)
+        if king.type != PieceType.KING or king.color != side:
+            return moves
         if rights.wk and field.type_at(5, y) == PieceType.NONE and field.type_at(6, y) == PieceType.NONE:
             if field.at(7, y).type == PieceType.ROOK and field.at(7, y).color == side:
                 if not is_square_attacked(field, 4, y, enemy) \
@@ -270,6 +273,9 @@ def _castle_moves(field: Field, side: SideType, rights: CastlingRights) -> list:
     else:
         y = 0
         enemy = SideType.WHITE
+        king = field.at(4, y)
+        if king.type != PieceType.KING or king.color != side:
+            return moves
         if rights.bk and field.type_at(5, y) == PieceType.NONE and field.type_at(6, y) == PieceType.NONE:
             if field.at(7, y).type == PieceType.ROOK and field.at(7, y).color == side:
                 if not is_square_attacked(field, 4, y, enemy) \
@@ -450,8 +456,15 @@ def _ep_capture_possible(field: Field, side: SideType, ep: Point) -> bool:
         if fx < 0 or fx > 7:
             continue
         p = field.at(fx, dy)
-        if (not p.is_empty and p.type == PieceType.PAWN
-                and p.color == side):
+        if p.is_empty or p.type != PieceType.PAWN or p.color != side:
+            continue
+        # Геометрически пешка бьёт клетку ep, но если она связана, взятие
+        # не входит в возможные ходы — для ст. 9.2 FIDE клетка ep тогда не
+        # отличает позицию.
+        undo = apply_move(field, Move.en_passant(fx, dy, ex, ey))
+        legal = not in_check(field, side)
+        undo_move(field, undo)
+        if legal:
             return True
     return False
 

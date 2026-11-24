@@ -153,6 +153,29 @@ def test_repetition_irrelevant_ep():
     check('неактуальная ep не мешает зафиксировать троекратное повторение',
           g.status == 'draw_repetition', g.status)
 
+    # Пешка e5 геометрически бьёт d6, но связана ладьёй e8 с королём e1.
+    # Такое взятие нелегально, поэтому клетка ep не входит в ключ позиции.
+    pinned = Field.empty()
+    pinned.set_piece(4, 7, PieceType.KING, SideType.WHITE)    # e1
+    pinned.set_piece(4, 3, PieceType.PAWN, SideType.WHITE)    # e5
+    pinned.set_piece(3, 3, PieceType.PAWN, SideType.BLACK)    # d5
+    pinned.set_piece(4, 0, PieceType.ROOK, SideType.BLACK)    # e8
+    pinned.set_piece(6, 0, PieceType.KING, SideType.BLACK)    # g8
+    ep_sq = Point(3, 2)   # d6
+    no_rights = R.CastlingRights(False, False, False, False)
+    key_ep = R.position_key(pinned, SideType.WHITE, no_rights, ep_sq)
+    key_no = R.position_key(pinned, SideType.WHITE, no_rights, None)
+    check('связанная пешка не делает ep частью ключа', key_ep == key_no)
+
+    free = Field.empty()
+    free.set_piece(4, 7, PieceType.KING, SideType.WHITE)
+    free.set_piece(4, 3, PieceType.PAWN, SideType.WHITE)
+    free.set_piece(3, 3, PieceType.PAWN, SideType.BLACK)
+    free.set_piece(6, 0, PieceType.KING, SideType.BLACK)
+    key_free = R.position_key(free, SideType.WHITE, no_rights, ep_sq)
+    key_free_no = R.position_key(free, SideType.WHITE, no_rights, None)
+    check('легальный ep входит в ключ позиции', key_free != key_free_no)
+
 
 def test_san_disambiguation():
     print('Тест: SAN-разыменование (Rad1 vs Rhd1)')
@@ -260,6 +283,55 @@ def test_from_fen():
         raised = True
     check('from_fen: сторона без хода под шахом → ValueError', raised)
 
+    raised = False
+    try:
+        Game.from_fen('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBN w KQkq - 0 1')
+    except ValueError:
+        raised = True
+    check('from_fen: короткая горизонталь → ValueError', raised)
+
+    raised = False
+    try:
+        Game.from_fen('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq e3 0 1')
+    except ValueError:
+        raised = True
+    check('from_fen: en passant без пешки двойного хода → ValueError', raised)
+
+    raised = False
+    try:
+        Game.from_fen('4k3/8/8/8/8/8/8/4K3 w K - 0 1')
+    except ValueError:
+        raised = True
+    check('from_fen: рокировка K без ладьи → ValueError', raised)
+
+    raised = False
+    try:
+        Game.from_fen('4k3/8/8/8/8/8/8/4K3 w - - -1 1')
+    except ValueError:
+        raised = True
+    check('from_fen: отрицательный счётчик полуходов → ValueError', raised)
+
+    raised = False
+    try:
+        Game.from_fen('4k3/8/8/8/8/8/8/4K3 w - - 0 0')
+    except ValueError:
+        raised = True
+    check('from_fen: номер хода 0 → ValueError', raised)
+
+    promo = Game.from_fen('k7/4P3/8/8/8/8/8/4K3 w - - 0 1')
+    q1 = promo.from_san('e8Q')
+    q2 = promo.from_san('e8=Q')
+    check('from_san: e8Q без знака =', q1.is_promotion and q1.promotion == PieceType.QUEEN)
+    check('from_san: e8Q совпадает с e8=Q', q1 == q2)
+
+    bare = Field.empty()
+    bare.set_piece(7, 7, PieceType.ROOK, SideType.WHITE)
+    bare.set_piece(3, 7, PieceType.KING, SideType.WHITE)
+    bare.set_piece(4, 0, PieceType.KING, SideType.BLACK)
+    castles = [m for m in R.pseudo_legal_moves(bare, SideType.WHITE, R.CastlingRights())
+               if m.is_castle]
+    check('рокировка без короля на e1 не генерируется', castles == [])
+
 
 def test_from_pgn():
     print('Тест: загрузка партии из PGN (from_san / from_pgn)')
@@ -296,9 +368,19 @@ def test_from_pgn():
     # 4. from_san поштучно
     gs = Game()
     check('from_san: e4', gs.from_san('e4').to_x == 4 and gs.from_san('e4').to_y == 4)
+    check('from_san: NAG «e4$1» не мешает разбору',
+          gs.from_san('e4$1') == gs.from_san('e4'))
     gs.make_move(gs.from_san('e4'))
     gs.make_move(gs.from_san('e5'))
     check('from_san: Nf3 (рыцарский прыжок)', gs.from_san('Nf3').to_x == 5 and gs.from_san('Nf3').to_y == 5)
+
+    amb = Game.from_fen('8/8/2N1N3/8/8/8/8/4K2k w - - 0 1')
+    raised_amb = False
+    try:
+        amb.from_san('Nd4')
+    except ValueError as e:
+        raised_amb = 'неоднозначен' in str(e)
+    check('from_san: неоднозначный Nd4 → ValueError', raised_amb)
 
     # 5. Нелегальный ход в PGN → ValueError с номером хода
     raised = False
@@ -314,6 +396,34 @@ def test_from_pgn():
     gfn = Game.from_pgn(pgn_fen)
     check('from_pgn: старт по [FEN]', gfn.history[0].san == 'Nf6', gfn.history[0].san)
     check('from_pgn: после [FEN] 2 полухода', len(gfn.history) == 2, len(gfn.history))
+    check('история: первый ход чёрных — «3...», не ход белых',
+          gfn.move_list_text() == ['3... Nf6', '4. Nc3'], gfn.move_list_text())
+    exported = gfn.pgn()
+    check('PGN нестандартного старта содержит [FEN]', '[FEN "' in exported, exported)
+    gfn2 = Game.from_pgn(exported)
+    check('PGN нестандартного старта: round-trip FEN', gfn2.fen() == gfn.fen(), gfn2.fen())
+
+    pgn_semi = '1. e4 e5; учебник\n2. Nf3 Nc6 *'
+    gsemi = Game.from_pgn(pgn_semi)
+    check('from_pgn: комментарий «;» до конца строки игнорируется',
+          [h.san for h in gsemi.history] == ['e4', 'e5', 'Nf3', 'Nc6'],
+          [h.san for h in gsemi.history])
+
+    two = '[Event "a"]\n\n1. e4 e5 1-0\n\n[Event "b"]\n\n1. d4 d5 *\n'
+    gtwo = Game.from_pgn(two)
+    check('from_pgn: из файла берётся только первая партия',
+          [h.san for h in gtwo.history] == ['e4', 'e5'],
+          [h.san for h in gtwo.history])
+
+    drawn = Field.empty()
+    drawn.set_piece(0, 7, PieceType.KING, SideType.WHITE)
+    drawn.set_piece(7, 0, PieceType.KING, SideType.BLACK)
+    gd = Game.from_position(drawn, halfmove=100,
+                            rights=R.CastlingRights(False, False, False, False))
+    quiet = Move.normal(0, 7, 0, 6)
+    check('после ничьей по 50 ходам make_move не продолжает партию',
+          gd.status == 'draw_50' and not gd.make_move(quiet) and len(gd.history) == 0,
+          f'status={gd.status} history={len(gd.history)}')
 
 
 def main():

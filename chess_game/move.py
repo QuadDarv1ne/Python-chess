@@ -129,5 +129,5 @@ class Move:
         flags = []
         if self.is_en_passant:
             flags.append('e.p.')
-        return f'Move({self.from_x},{self.from_y}->{self.to_x},{self.to_y}{promo}' + (
-            f' [{",".join(flags)}]' if flags else '')
+        extra = f' [{",".join(flags)}]' if flags else ''
+        return f'Move({self.from_x},{self.from_y}->{self.to_x},{self.to_y}{promo}{extra})'

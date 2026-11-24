@@ -229,7 +229,7 @@ def evaluate(field: Field, side: SideType) -> float:
     '''
     score = 0  # с точки зрения белых
     pawn_files = {SideType.WHITE: [0] * 8, SideType.BLACK: [0] * 8}
-    bishops = {SideType.WHITE: 0, SideType.BLACK: 0}
+    bishops = {SideType.WHITE: set(), SideType.BLACK: set()}
     king_pos = {SideType.WHITE: None, SideType.BLACK: None}
     non_pawn_mat = 0
     for x, y, piece in field.pieces():
@@ -245,7 +245,7 @@ def evaluate(field: Field, side: SideType) -> float:
         if t == PieceType.PAWN:
             pawn_files[c][x] += 1
         elif t == PieceType.BISHOP:
-            bishops[c] += 1
+            bishops[c].add((x + y) % 2)
         if t != PieceType.PAWN:
             non_pawn_mat += PIECE_VALUES[t]
 
@@ -282,10 +282,11 @@ def evaluate(field: Field, side: SideType) -> float:
             if left == 0 and right == 0:
                 score -= sgn * 15 * n                     # изолированные
 
-    # Бонус за пару слонов: два слона разных цветов сильнее двух коней/слона+коня
-    if bishops[SideType.WHITE] >= 2:
+    # Бонус за пару слонов: только разнопольные слоны. Два слона на одном цвете
+    # бьют одни и те же клетки и пары не образуют.
+    if len(bishops[SideType.WHITE]) >= 2:
         score += 30
-    if bishops[SideType.BLACK] >= 2:
+    if len(bishops[SideType.BLACK]) >= 2:
         score -= 30
 
     return score if side == SideType.WHITE else -score
@@ -313,6 +314,30 @@ def _victim_value(field: Field, move: Move) -> int:
         return PIECE_VALUES[PieceType.PAWN]
     target = field.at(move.to_x, move.to_y)
     return PIECE_VALUES[target.type] if not target.is_empty else 0
+
+
+def _tactic_gain(field: Field, move: Move) -> int:
+    '''Материальный потолок хода для delta-отсечения.
+
+    Тихое превращение не бьёт фигуру, но меняет пешку на ферзя/ладью/слона/коня.
+    Без этой добавки quiescence выбрасывает такой ход, когда stand-pat уже
+    близок к alpha.
+    '''
+    gain = _victim_value(field, move)
+    if move.is_promotion:
+        gain += PIECE_VALUES[move.promotion] - PIECE_VALUES[PieceType.PAWN]
+    return gain
+
+
+def _next_halfmove(field: Field, move: Move, halfmove: int) -> int:
+    '''Счётчик 50 ходов после хода. Сбрасывается взятием, ходом пешки и превращением.'''
+    if move.is_en_passant or move.is_promotion:
+        return 0
+    if field.at(move.from_x, move.from_y).type == PieceType.PAWN:
+        return 0
+    if not field.at(move.to_x, move.to_y).is_empty:
+        return 0
+    return halfmove + 1
 
 
 def _has_non_pawn_material(field: Field, side: SideType) -> bool:
@@ -424,10 +449,10 @@ class Engine:
     # -- TT --
 
     def __tt_probe(self, field: Field, side: SideType, rights: R.CastlingRights,
-                   ep: Point, depth: int, ply: int,
+                   ep: Point, halfmove: int, depth: int, ply: int,
                    alpha: float, beta: float):
-        '''Вернуть (tt_move, cutoff_value_or_None)'''
-        key = R.position_key(field, side, rights, ep)
+        '''Вернуть (tt_key, tt_move, cutoff_value_or_None)'''
+        key = self.__tt_slot(R.position_key(field, side, rights, ep), halfmove, depth)
         entry = self.__tt.get(key)
         if entry is None:
             return key, None, None
@@ -463,8 +488,16 @@ class Engine:
 
     # -- Quiescence --
 
+    def __tt_slot(self, pos_key: bytes, halfmove: int, depth: int):
+        '''Ключ TT. У горизонта правила 50 ходов к ключу добавляется счётчик,
+        иначе ничейная оценка с высоким halfmove читалась бы в другой ветке.
+        '''
+        if halfmove + max(depth, 0) >= 100:
+            return (pos_key, halfmove)
+        return pos_key
+
     def __quiesce(self, field: Field, side: SideType, rights: R.CastlingRights,
-                  ep: Point, ply: int, alpha: float, beta: float) -> float:
+                  ep: Point, halfmove: int, ply: int, alpha: float, beta: float) -> float:
         self.__nodes += 1
         if (self.__nodes & 2047) == 0 and self.__time_is_up():
             return evaluate(field, side)
@@ -472,6 +505,10 @@ class Engine:
             return evaluate(field, side)
 
         in_chk = R.in_check(field, side)
+        # Правило 50 ходов. Мат важнее: под шахом ничью не возвращаем, пока
+        # не ясно, что уклонение есть.
+        if halfmove >= 100 and not in_chk:
+            return 0.0
         if in_chk:
             # Под шахом stand-pat незаконен: ищем ВСЕ уклонения (evasions).
             # legal_moves уже отфильтрованы по «король не под шахом после хода»,
@@ -482,11 +519,12 @@ class Engine:
             for move in moves:
                 if (self.__nodes & 2047) == 0 and self.__time_is_up():
                     break
+                new_half = _next_halfmove(field, move, halfmove)
                 undo = R.apply_move(field, move)
                 new_rights = R.update_castling_rights(rights, move)
                 new_ep = R.en_passant_target(move) if move.is_double_pawn else None
                 value = -self.__quiesce(field, SideType.opposite(side), new_rights,
-                                        new_ep, ply + 1, -beta, -alpha)
+                                        new_ep, new_half, ply + 1, -beta, -alpha)
                 R.undo_move(field, undo)
                 if value > best:
                     best = value
@@ -508,8 +546,9 @@ class Engine:
 
         for move in self.__order(field, _capture_moves(field, side, rights, ep), ply):
             # Delta-отсечение: даже выиграв взятие, не перебить alpha — пропускаем
-            if stand_pat + _victim_value(field, move) + DELTA_MARGIN < alpha:
+            if stand_pat + _tactic_gain(field, move) + DELTA_MARGIN < alpha:
                 continue
+            new_half = _next_halfmove(field, move, halfmove)
             undo = R.apply_move(field, move)
             if R.in_check(field, side):   # ход оставил своего короля под шахом
                 R.undo_move(field, undo)
@@ -517,7 +556,7 @@ class Engine:
             new_rights = R.update_castling_rights(rights, move)
             new_ep = R.en_passant_target(move) if move.is_double_pawn else None
             value = -self.__quiesce(field, SideType.opposite(side), new_rights,
-                                    new_ep, ply + 1, -beta, -alpha)
+                                    new_ep, new_half, ply + 1, -beta, -alpha)
             R.undo_move(field, undo)
             if value >= beta:
                 return value
@@ -529,7 +568,7 @@ class Engine:
     # -- Negamax --
 
     def __negamax(self, field: Field, side: SideType, rights: R.CastlingRights,
-                  ep: Point, depth: int, ply: int,
+                  ep: Point, halfmove: int, depth: int, ply: int,
                   alpha: float, beta: float) -> float:
         self.__nodes += 1
         if (self.__nodes & 2047) == 0 and self.__time_is_up():
@@ -549,16 +588,18 @@ class Engine:
             if self.__rep_before.get(key, 0) + self.__path_counter[key] >= 3:
                 return 0.0
 
+            in_chk = R.in_check(field, side)
+            if halfmove >= 100 and not in_chk:
+                return 0.0
+
             alpha_orig = alpha
             _, tt_move, cutoff = self.__tt_probe(field, side, rights, ep,
-                                                 depth, ply, alpha, beta)
+                                                 halfmove, depth, ply, alpha, beta)
             if cutoff is not None:
                 return cutoff
 
             if depth <= 0:
-                return self.__quiesce(field, side, rights, ep, ply, alpha, beta)
-
-            in_chk = R.in_check(field, side)
+                return self.__quiesce(field, side, rights, ep, halfmove, ply, alpha, beta)
 
             # Null-move pruning (R=2): если сторона может «пропустить» ход и всё
             # равно оценка ≥ beta, то реальный ход тем более хорош. Не делаем под
@@ -568,7 +609,7 @@ class Engine:
             if (depth >= 3 and not in_chk and beta < inf
                     and _has_non_pawn_material(field, side)):
                 value = -self.__negamax(field, SideType.opposite(side), rights, None,
-                                       depth - 1 - 2, ply + 1, -beta, -beta + 1)
+                                       halfmove, depth - 1 - 2, ply + 1, -beta, -beta + 1)
                 if self.__time_is_up():
                     return evaluate(field, side)
                 if value >= beta:
@@ -583,6 +624,7 @@ class Engine:
                 if (self.__nodes & 2047) == 0 and self.__time_is_up():
                     break
 
+                new_half = _next_halfmove(field, move, halfmove)
                 undo = R.apply_move(field, move)
                 if R.in_check(field, side):   # нелегальный — оставляет короля под боем
                     R.undo_move(field, undo)
@@ -603,17 +645,17 @@ class Engine:
                          and not gives_check and move != tt_move)
                 reduce = 1 if (depth >= 3 and legal_count >= 4 and quiet) else 0
                 if reduce:
-                    value = -self.__negamax(field, opp, new_rights, new_ep,
+                    value = -self.__negamax(field, opp, new_rights, new_ep, new_half,
                                             full_depth - 1, ply + 1, -beta, -alpha)
                     if self.__time_is_up():
                         R.undo_move(field, undo)
                         break
                     if value > alpha:
                         # Reduced-поиск дал улучшение — перепроверим на полной глубине
-                        value = -self.__negamax(field, opp, new_rights, new_ep,
+                        value = -self.__negamax(field, opp, new_rights, new_ep, new_half,
                                                 full_depth, ply + 1, -beta, -alpha)
                 else:
-                    value = -self.__negamax(field, opp, new_rights, new_ep,
+                    value = -self.__negamax(field, opp, new_rights, new_ep, new_half,
                                             full_depth, ply + 1, -beta, -alpha)
                 R.undo_move(field, undo)
 
@@ -652,14 +694,14 @@ class Engine:
     # -- Корень: итеративное углубление --
 
     def __search_root(self, field: Field, side: SideType,
-                      rights: R.CastlingRights, ep: Point, depth: int,
+                      rights: R.CastlingRights, ep: Point, halfmove: int, depth: int,
                       alpha: float = -inf, beta: float = inf):
         # ordering: PV-ход с прошлой итерации, иначе TT-ход; затем MVV-LVA и т.д.
         root_key = R.position_key(field, side, rights, ep)
         # Корень учитывается в повторениях потомков: если потомок возвращает
         # позицию корня, это повторение (см. детекцию в __negamax).
         self.__path_counter[root_key] += 1
-        entry = self.__tt.get(root_key)
+        entry = self.__tt.get(self.__tt_slot(root_key, halfmove, depth))
         tt_move = entry[3] if entry else None
         hint = self.__pv_move if self.__pv_move is not None else tt_move
 
@@ -670,6 +712,7 @@ class Engine:
         best = -inf
         best_moves = []
         for move in moves:
+            new_half = _next_halfmove(field, move, halfmove)
             undo = R.apply_move(field, move)
             if R.in_check(field, side):
                 R.undo_move(field, undo)
@@ -679,7 +722,7 @@ class Engine:
             # Окно сужается по alpha: каждый следующий корневой ход ищется с
             # верхней границей -alpha, давая отсечения в поддереве.
             value = -self.__negamax(field, SideType.opposite(side), new_rights,
-                                    new_ep, depth - 1, 1, -beta, -alpha)
+                                    new_ep, new_half, depth - 1, 1, -beta, -alpha)
             R.undo_move(field, undo)
 
             if self.__time_is_up():
@@ -700,8 +743,8 @@ class Engine:
         if best_moves and not self.__time_is_up():
             # Флаг записи (EXACT/LOWER/UPPER) определяется сам по alpha_orig/beta,
             # так что аспирационные окна не портят TT неверным «точным» значением.
-            self.__tt_store(root_key, depth, alpha_orig, beta,
-                            best, best_moves[0], 0)
+            self.__tt_store(self.__tt_slot(root_key, halfmove, depth), depth,
+                            alpha_orig, beta, best, best_moves[0], 0)
         # Очистка счётчика пути корня (балансирует push в начале __search_root).
         c = self.__path_counter[root_key] - 1
         if c <= 0:
@@ -712,12 +755,14 @@ class Engine:
 
     def search(self, field: Field, side: SideType,
                rights: R.CastlingRights, ep: Point = None,
-               rep_keys: Optional[list] = None) -> SearchResult:
+               rep_keys: Optional[list] = None, halfmove: int = 0) -> SearchResult:
         '''Найти лучший ход: итеративное углубление от 1 до max_depth.
 
         rep_keys — список ключей позиции из реальной партии (включая текущий
         корень последний элементом); нужен, чтобы движок засчитывал ничью по
         троекратному повторению прямо внутри поиска, а не только на уровне Game.
+        halfmove — счётчик правила 50 ходов в корне: внутри дерева тихий ход,
+        доводящий его до 100, оценивается как ничья (мат при этом важнее).
         '''
         started = perf_counter()
         self.__nodes = 0
@@ -762,13 +807,13 @@ class Engine:
                 a = prev_score - window
                 b = prev_score + window
                 score, candidates = self.__search_root(field, side, rights, ep,
-                                                       depth, a, b)
+                                                       halfmove, depth, a, b)
                 if not self.__time_is_up() and (score <= a or score >= b):
                     score, candidates = self.__search_root(field, side, rights, ep,
-                                                           depth, -inf, inf)
+                                                           halfmove, depth, -inf, inf)
             else:
                 score, candidates = self.__search_root(field, side, rights, ep,
-                                                       depth)
+                                                       halfmove, depth)
             if candidates and not self.__time_is_up():
                 best_move = candidates[0]
                 best_score = score
@@ -791,6 +836,7 @@ class Engine:
         if self.noise_scale > 0 and best_move is not None and not self.__time_is_up():
             scored = []
             for move in root_moves:
+                new_half = _next_halfmove(field, move, halfmove)
                 undo = R.apply_move(field, move)
                 if R.in_check(field, side):
                     R.undo_move(field, undo)
@@ -798,7 +844,7 @@ class Engine:
                 new_rights = R.update_castling_rights(rights, move)
                 new_ep = R.en_passant_target(move) if move.is_double_pawn else None
                 value = -self.__negamax(field, SideType.opposite(side), new_rights,
-                                        new_ep, max(0, reached_depth - 1), 1, -inf, inf)
+                                        new_ep, new_half, max(0, reached_depth - 1), 1, -inf, inf)
                 R.undo_move(field, undo)
                 scored.append((value, move))
                 if self.__time_is_up():
@@ -813,7 +859,8 @@ class Engine:
         # Главный вариант: идём по best-move из TT, пока запись есть и ход
         # легален. TT после поиска сохранён, поэтому достаточно проследовать по
         # нему из корня (поле восстанавливается откатом).
-        pv = self._extract_pv(field, side, rights, ep) if best_move is not None else []
+        pv = (self._extract_pv(field, side, rights, ep, halfmove)
+              if best_move is not None else [])
 
         return SearchResult(
             move=best_move,
@@ -826,21 +873,23 @@ class Engine:
         )
 
     def _extract_pv(self, field: Field, side: SideType,
-                    rights: R.CastlingRights, ep: Point, max_plies: int = 8) -> list:
+                    rights: R.CastlingRights, ep: Point, halfmove: int = 0,
+                    max_plies: int = 8) -> list:
         '''Главный вариант из таблицы транспозиций (best-move-line).'''
         pv = []
         undos = []
         seen = set()
-        s, r, e = side, rights, ep
+        s, r, e, hm = side, rights, ep, halfmove
         for _ in range(max_plies):
             key = R.position_key(field, s, r, e)
             if key in seen:
                 break
             seen.add(key)
-            entry = self.__tt.get(key)
+            entry = self.__tt.get((key, hm)) or self.__tt.get(key)
             if entry is None or entry[3] is None:
                 break
             move = entry[3]
+            hm = _next_halfmove(field, move, hm)
             undo = R.apply_move(field, move)
             if R.in_check(field, s):   # TT хранит легальный best-move, но подстрахуемся
                 R.undo_move(field, undo)
