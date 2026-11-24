@@ -579,16 +579,24 @@ class SoundManager:
             self._music_commands.put(offset)
 
     def _start_music(self):
-        if self._music_thread is not None:
+        # Поток мог завершиться с ошибкой (например, MCI не открыл файл) и не
+        # успеть очистить ссылку — проверяем именно живость, иначе после сбоя
+        # плеер больше никогда не запустился бы в рамках сессии.
+        if self._music_thread is not None and self._music_thread.is_alive():
             return
         while not self._music_commands.empty():
             self._music_commands.get_nowait()
         with self._music_state_lock:
             self._current_track = None
+        # Уникальный на запуск алиас: затухающий поток старого плеера при
+        # быстром выкл/вкл не должен закрыть MCI-устройство нового потока
+        # (алиас принадлежит создавшему его потоку и переиспользуется в mci close).
+        self._music_alias_seq = getattr(self, '_music_alias_seq', 0) + 1
+        alias = f'chess_music_{os.getpid()}_{self._music_alias_seq}'
         self._music_stop = threading.Event()
         self._music_thread = threading.Thread(
             target=self._music_worker,
-            args=(self._music_stop, self._volume),
+            args=(self._music_stop, self._volume, alias),
             daemon=True,
             name='chess-music',
         )
@@ -596,12 +604,19 @@ class SoundManager:
 
     def _stop_music(self):
         stop = self._music_stop
+        thread = self._music_thread
         self._music_stop = None
-        self._music_thread = None
         with self._music_state_lock:
             self._current_track = None
         if stop is not None:
             stop.set()
+        # Дожидаемся выхода потока (он закроет свой уникальный алиас), чтобы
+        # новый _start_music не столкнулся с ещё живым старым плеером.
+        if (thread is not None and thread.is_alive()
+                and thread is not threading.current_thread()):
+            thread.join(timeout=1.0)
+        if self._music_thread is thread:
+            self._music_thread = None
 
     def _music_worker(self, stop: threading.Event, volume: int):
         """Фоновая музыка с управлением плейлистом из музыкального потока.
