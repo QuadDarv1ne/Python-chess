@@ -13,6 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Консоль Windows по умолчанию в cp1251 — переключаем вывод в UTF-8, иначе
+# юникодные символы (→, ≈, кириллица) роняют тест с UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8')
+
 from chess_game.game import Game
 from chess_game.engine import Engine
 from chess_game import rules as R

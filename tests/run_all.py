@@ -15,6 +15,7 @@ TESTS = (
     'tactical_test.py',
     'engine_smoke.py',
     'game_smoke.py',
+    'audio_smoke.py',
 )
 
 

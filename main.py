@@ -1,5 +1,4 @@
-"""
-Tkinter-интерфейс шахмат на основе chess_game.
+"""Tkinter-интерфейс шахмат на основе chess_game.
 
 Зеркальная по ролям замена checkers/main.py: канвасная доска 8×8 с глифами
 фигур, подсветка выбора и возможных ходов, анимация хода (скольжение),
@@ -34,6 +33,7 @@ from chess_game.field import Field
 from chess_game.move import Move
 from chess_game.game import Game, decode_pgn_bytes
 from chess_game.engine import Engine
+from chess_game.audio import SoundManager
 
 MARGIN = 22            # поле под координаты
 PIECE_FONT_SIZE = int(CELL_SIZE * 0.78)
@@ -55,6 +55,13 @@ class ChessApp:
         self.player_side = SideType.WHITE
         self.difficulty = DifficultyType.MEDIUM
         self.game = Game(player_side=self.player_side, difficulty=self.difficulty)
+
+        # Звук: эффекты хода и фоновая фортепианная музыка (синтез на лету).
+        # Менеджер — синглтон на процесс: состояние переживает новые партии.
+        self.sound = SoundManager()
+        self._sound_var = tk.BooleanVar(value=self.sound.enabled)
+        self._music_var = tk.BooleanVar(value=self.sound.music_enabled)
+        self._volume_var = tk.IntVar(value=self.sound.volume)
 
         self.selected = None          # (x, y) выбранной фигуры
         self._hover = None
@@ -126,6 +133,19 @@ class ChessApp:
         m_view.add_command(label='Перевернуть доску\tCtrl+F', command=self.toggle_flip)
         menubar.add_cascade(label='Вид', menu=m_view)
 
+        m_sound = tk.Menu(menubar, tearoff=0)
+        m_sound.add_checkbutton(label='Звуковые эффекты\tCtrl+S',
+                                variable=self._sound_var, command=self.on_sound_toggle)
+        m_sound.add_checkbutton(label='Фоновая музыка\tCtrl+M',
+                                variable=self._music_var, command=self.on_music_toggle)
+        m_sound.add_separator()
+        m_vol = tk.Menu(m_sound, tearoff=0)
+        for vol, label in ((30, 'Низкая'), (50, 'Средняя'), (75, 'Высокая'), (100, 'Максимальная')):
+            m_vol.add_radiobutton(label=label, value=vol, variable=self._volume_var,
+                                  command=self.on_volume_change)
+        m_sound.add_cascade(label='Громкость', menu=m_vol)
+        menubar.add_cascade(label='Звук', menu=m_sound)
+
         self.root.config(menu=menubar)
 
     def _build_layout(self):
@@ -186,6 +206,10 @@ class ChessApp:
         self.root.bind('<Control-f>', lambda e: self.toggle_flip())
         self.root.bind('<Control-F>', lambda e: self.toggle_flip())
         self.root.bind('<Escape>', lambda e: self._clear_selection())
+        self.root.bind('<Control-s>', lambda e: self._toggle_sound())
+        self.root.bind('<Control-S>', lambda e: self._toggle_sound())
+        self.root.bind('<Control-m>', lambda e: self._toggle_music())
+        self.root.bind('<Control-M>', lambda e: self._toggle_music())
 
     # -- Координаты --
 
@@ -471,8 +495,10 @@ class ChessApp:
             self._do_move(Move.promoting(fx, fy, tx, ty, chosen['piece']))
 
     def _do_move(self, move: Move):
+        kind = self._move_sound_kind(move)   # определяем ДО применения хода
         if not self.game.make_move(move):
             return
+        self.sound.play(kind)
         self.last_move = move
         self.selected = None
         self._hint_move = None
@@ -559,7 +585,9 @@ class ChessApp:
             return
         # Оценка ИИ — со стороны ходившей стороны; переведём к белым
         self._eval_white = res.score if side == SideType.WHITE else -res.score
+        kind = self._move_sound_kind(res.move)   # ДО применения хода
         self.game.make_move(res.move)
+        self.sound.play(kind)
         self.last_move = res.move
         self._hint_move = None
         self.pv_var.set('')   # устаревший вариант подсказки убираем при ходе ИИ
@@ -669,6 +697,41 @@ class ChessApp:
         self.player_side = side
         # Смена стороны — новая партия, чтобы не нарушать очерёдность
         self.new_game()
+
+    # -- Звук --
+
+    def _move_sound_kind(self, move: Move) -> str:
+        '''Тип эффекта для хода: превращение > взятие > обычный ход.
+
+        Вызывать ДО применения хода — состояние поля нужно для проверки взятия.
+        '''
+        if move.is_promotion:
+            return 'promote'
+        target = self.game.field.at(move.to_x, move.to_y)
+        if not target.is_empty or move.is_en_passant:
+            return 'capture'
+        return 'move'
+
+    def on_sound_toggle(self):
+        self.sound.set_enabled(self._sound_var.get())
+
+    def on_music_toggle(self):
+        self.sound.set_music_enabled(self._music_var.get())
+        # Если платформа не поддерживает музыку — вернуть галку в снятое состояние
+        self._music_var.set(self.sound.music_enabled)
+
+    def _toggle_sound(self):
+        '''Горячая клавиша: переключить эффекты и синхронизировать галку меню.'''
+        self.sound.toggle()
+        self._sound_var.set(self.sound.enabled)
+
+    def _toggle_music(self):
+        '''Горячая клавиша: переключить музыку и синхронизировать галку меню.'''
+        self.sound.toggle_music()
+        self._music_var.set(self.sound.music_enabled)
+
+    def on_volume_change(self):
+        self.sound.set_volume(self._volume_var.get())
 
     def toggle_flip(self):
         self.flipped = not self.flipped
@@ -850,6 +913,7 @@ class ChessApp:
 
     def _on_close(self):
         self._cancel_ai()
+        self.sound.set_music_enabled(False)
         self.root.destroy()
 
 

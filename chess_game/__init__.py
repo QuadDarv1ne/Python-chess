@@ -10,9 +10,10 @@
   rules     — генерация ходов, атака клетки, шах/мат/пат, apply/undo
   engine    — поиск лучшего хода (negamax + alpha-beta + quiescence)
   game      — состояние партии, история, статус, нотация
+  audio     — синтез эффектов и фоновой фортепианной музыки
 """
 
 __all__ = [
     'enums', 'constants', 'point', 'move', 'piece',
-    'field', 'rules', 'engine', 'game',
+    'field', 'rules', 'engine', 'game', 'audio',
 ]
