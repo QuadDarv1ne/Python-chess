@@ -166,6 +166,13 @@ class ChessApp:
         self._sound_menu = m_sound
         menubar.add_cascade(label='Звук', menu=m_sound)
 
+        # Последние применённые значения пунктов меню трека. Поллер переконфигурирует
+        # их только при реальном изменении: на Windows entryconfigure перерисовывает
+        # меню (а смена длины названия трека ещё и меняет его ширину), из-за чего при
+        # безусловном обновлении каждые 500 мс открытое меню мерцает и «прыгает».
+        self._last_track_label = None
+        self._last_nav_state = None
+
         self.root.config(menu=menubar)
         self.root.after(500, self._refresh_music_menu)
 
@@ -763,15 +770,22 @@ class ChessApp:
     def _refresh_music_menu(self):
         track = self.sound.current_track or '—'
         self._music_var.set(self.sound.music_enabled)
-        self._sound_menu.entryconfigure(
-            self._current_track_index, label=f'Сейчас играет: {track}')
+        # Обновляем пункты только при изменении — иначе каждые 500 мс переконфигурация
+        # перерисовывает меню и оно мерцает/прыгает (особенно когда открыто).
+        track_label = f'Сейчас играет: {track}'
+        if track_label != self._last_track_label:
+            self._last_track_label = track_label
+            self._sound_menu.entryconfigure(
+                self._current_track_index, label=track_label)
         nav_state = (
             tk.NORMAL
             if self.sound.music_enabled and self.sound.music_track_navigation_available
             else tk.DISABLED
         )
-        self._sound_menu.entryconfigure(self._previous_track_index, state=nav_state)
-        self._sound_menu.entryconfigure(self._next_track_index, state=nav_state)
+        if nav_state != self._last_nav_state:
+            self._last_nav_state = nav_state
+            self._sound_menu.entryconfigure(self._previous_track_index, state=nav_state)
+            self._sound_menu.entryconfigure(self._next_track_index, state=nav_state)
         self.root.after(500, self._refresh_music_menu)
 
     def toggle_flip(self):
