@@ -32,7 +32,7 @@ from chess_game.constants import (
 from chess_game.enums import PieceType, SideType, DifficultyType
 from chess_game.field import Field
 from chess_game.move import Move
-from chess_game.game import Game
+from chess_game.game import Game, decode_pgn_bytes
 from chess_game.engine import Engine
 
 MARGIN = 22            # поле под координаты
@@ -756,8 +756,7 @@ class ChessApp:
         if not path:
             return
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                text = f.read()
+            text = decode_pgn_bytes(Path(path).read_bytes())
         except OSError as e:
             messagebox.showerror('PGN', f'Не удалось прочитать файл:\n{e}')
             return

@@ -415,6 +415,24 @@ def test_from_pgn():
           [h.san for h in gtwo.history] == ['e4', 'e5'],
           [h.san for h in gtwo.history])
 
+    raised_setup = False
+    try:
+        Game.from_pgn('[SetUp "1"]\n\n1. e4 *')
+    except ValueError as e:
+        raised_setup = 'FEN' in str(e)
+    check('from_pgn: [SetUp "1"] без [FEN] → ValueError', raised_setup)
+
+    from chess_game.game import decode_pgn_bytes
+    raw = '1. e4 {привет} e5 *'.encode('cp1251')
+    genc = Game.from_pgn(decode_pgn_bytes(raw))
+    check('PGN в cp1251 читается',
+          [h.san for h in genc.history] == ['e4', 'e5'],
+          [h.san for h in genc.history])
+    gbom = Game.from_pgn('\ufeff[Event "a"]\n\n1. e4 *')
+    check('from_pgn: BOM в начале файла не ломает разбор',
+          [h.san for h in gbom.history] == ['e4'],
+          [h.san for h in gbom.history])
+
     drawn = Field.empty()
     drawn.set_piece(0, 7, PieceType.KING, SideType.WHITE)
     drawn.set_piece(7, 0, PieceType.KING, SideType.BLACK)

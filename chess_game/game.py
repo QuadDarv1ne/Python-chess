@@ -259,6 +259,16 @@ def _strip_pgn_movetext(text: str) -> str:
     return ''.join(out)
 
 
+def decode_pgn_bytes(data: bytes) -> str:
+    '''Текст PGN из байтов файла: UTF-8 (с BOM), затем cp1251, затем latin-1.'''
+    for enc in ('utf-8-sig', 'utf-8', 'cp1251'):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode('latin-1')
+
+
 def _first_pgn_game(pgn_text: str) -> str:
     '''Текст только первой партии. Следующий заголовок «[» после ходов начинает новую.'''
     kept = []
@@ -443,9 +453,11 @@ class Game:
         ходов и результат. Каждый SAN-токен сопоставляется с легальным ходом
         через from_san. При невозможном ходе — ValueError с номером хода.
         '''
-        pgn_text = _first_pgn_game(pgn_text)
+        pgn_text = _first_pgn_game(pgn_text.lstrip('\ufeff'))
         # Заголовки [Key "Value"]
         headers = dict(re.findall(r'\[(\w+)\s+"([^"]*)"\]', pgn_text))
+        if headers.get('SetUp') == '1' and not headers.get('FEN'):
+            raise ValueError('заголовок [SetUp "1"] задан без [FEN]')
         # Тело без строк-заголовков
         body = re.sub(r'^\[.*\]\s*$', '', pgn_text, flags=re.MULTILINE).strip()
         fen = headers.get('FEN')

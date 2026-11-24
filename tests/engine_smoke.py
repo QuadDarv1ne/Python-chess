@@ -80,6 +80,20 @@ def test_eval_and_aspiration():
     assert draw_res.score == 0.0, f'ожидалась ничья по 50 ходам, score={draw_res.score}'
     print('  [PASS] правило 50 ходов внутри поиска: score=0')
 
+    # PV не подставляет ход из TT-записи без счётчика, если при текущем
+    # halfmove эта запись хранилась бы уже с ключом (позиция, halfmove).
+    rights0 = R.CastlingRights(False, False, False, False)
+    key = R.position_key(bare, SideType.WHITE, rights0, None)
+    plain_move = Move.normal(0, 7, 1, 7)   # a1-b1, depth 5 → слот без счётчика только при hm < 95
+    clock_move = Move.normal(0, 7, 0, 6)   # a1-a2
+    draw_eng._Engine__tt[key] = (5, 0, 10.0, plain_move)
+    draw_eng._Engine__tt[(key, 99)] = (2, 0, 0.0, clock_move)
+    pv_hi = draw_eng._extract_pv(bare, SideType.WHITE, rights0, None, halfmove=99)
+    pv_lo = draw_eng._extract_pv(bare, SideType.WHITE, rights0, None, halfmove=0)
+    assert pv_hi and pv_hi[0] == clock_move, pv_hi
+    assert pv_lo and pv_lo[0] == plain_move, pv_lo
+    print('  [PASS] PV не берёт ход из чужого счётчика 50 ходов')
+
 
 def main():
     print('=== Дымовой тест движка ===\n')

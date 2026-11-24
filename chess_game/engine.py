@@ -221,15 +221,16 @@ def evaluate(field: Field, side: SideType) -> float:
     '''Оценка позиции в сотых пешки со стороны side (больше — лучше для side).
 
     Состав: материал (без короля) + piece-square таблицы + пешечная структура
-    (штраф за сдвоенные и изолированные пешки) + бонус за пару слонов + оценка
-    короля, интерполированная по фазе (миттельшпиль — беречь и держать пешечный
+    (штраф за сдвоенные и изолированные пешки) + бонус за разнопольную пару
+    слонов + оценка короля, интерполированная по фазе (миттельшпиль — беречь и держать пешечный
     щит; эндшпиль — выходить в центр). Мобильность сознательно не считается: в
     чистом Python генерация ходов на каждом листе замедлила бы движок в разы,
     а PST уже косвенно поощряет развитие фигур.
     '''
     score = 0  # с точки зрения белых
     pawn_files = {SideType.WHITE: [0] * 8, SideType.BLACK: [0] * 8}
-    bishops = {SideType.WHITE: set(), SideType.BLACK: set()}
+    # Цвета клеток слонов: 0 и 1. Пара есть только если присутствуют оба цвета.
+    bishop_colors = {SideType.WHITE: set(), SideType.BLACK: set()}
     king_pos = {SideType.WHITE: None, SideType.BLACK: None}
     non_pawn_mat = 0
     for x, y, piece in field.pieces():
@@ -245,7 +246,7 @@ def evaluate(field: Field, side: SideType) -> float:
         if t == PieceType.PAWN:
             pawn_files[c][x] += 1
         elif t == PieceType.BISHOP:
-            bishops[c].add((x + y) % 2)
+            bishop_colors[c].add((x + y) % 2)
         if t != PieceType.PAWN:
             non_pawn_mat += PIECE_VALUES[t]
 
@@ -282,11 +283,11 @@ def evaluate(field: Field, side: SideType) -> float:
             if left == 0 and right == 0:
                 score -= sgn * 15 * n                     # изолированные
 
-    # Бонус за пару слонов: только разнопольные слоны. Два слона на одном цвете
-    # бьют одни и те же клетки и пары не образуют.
-    if len(bishops[SideType.WHITE]) >= 2:
+    # Разнопольная пара: в множестве оба цвета клеток. Несколько слонов на
+    # одном цвете дают один элемент и бонус не получают.
+    if bishop_colors[SideType.WHITE] == {0, 1}:
         score += 30
-    if len(bishops[SideType.BLACK]) >= 2:
+    if bishop_colors[SideType.BLACK] == {0, 1}:
         score -= 30
 
     return score if side == SideType.WHITE else -score
@@ -872,6 +873,21 @@ class Engine:
             pv=pv,
         )
 
+    def __tt_pv_entry(self, pos_key: bytes, halfmove: int):
+        '''Запись TT для текущего счётчика 50 ходов.
+
+        Запись без счётчика пишется только при halfmove + depth < 100.
+        Если при этом счётчике горизонт правила 50 уже близко, такая запись
+        относится к другой истории ходов и в главный вариант не берётся.
+        '''
+        qualified = self.__tt.get((pos_key, halfmove))
+        plain = self.__tt.get(pos_key)
+        if qualified is not None and (plain is None or halfmove + qualified[0] >= 100):
+            return qualified
+        if plain is not None and halfmove + plain[0] < 100:
+            return plain
+        return qualified
+
     def _extract_pv(self, field: Field, side: SideType,
                     rights: R.CastlingRights, ep: Point, halfmove: int = 0,
                     max_plies: int = 8) -> list:
@@ -885,7 +901,7 @@ class Engine:
             if key in seen:
                 break
             seen.add(key)
-            entry = self.__tt.get((key, hm)) or self.__tt.get(key)
+            entry = self.__tt_pv_entry(key, hm)
             if entry is None or entry[3] is None:
                 break
             move = entry[3]
