@@ -65,9 +65,10 @@ MP3_EXTENSIONS = ('.mp3', '.wav', '.wmv', '.m4a')
 # Папка с пользовательскими WAV-эффектами: файл assets/sfx/<имя>.wav
 # (move/capture/promote) подменяет синтезированный звук этого эффекта.
 _CUSTOM_SFX_DIR = Path(__file__).resolve().parent.parent / 'assets' / 'sfx'
-# Целевой пик пользовательского эффекта (как у синтезированных) — чтобы
-# громкость была согласованной, а регулятор громкости применялся поверх.
-CUSTOM_SFX_PEAK = 0.3
+# Целевой пик пользовательского эффекта: мягкая, но отчётливо слышимая
+# громкость (как у синтезированных эффектов на настройке «Высокая»).
+# Регулятор громкости применяется поверх этого пика.
+CUSTOM_SFX_PEAK = 0.8
 
 
 def list_music_files() -> list[Path]:
@@ -415,7 +416,8 @@ def cached_wav(name: str, volume: int) -> Path | None:
     else:
         rate = MUSIC_SAMPLE_RATE if name == 'music' else SAMPLE_RATE
 
-    tag = 'custom' if custom is not None else f'v{SYNTH_VERSION}'
+    tag = (f'custom-p{int(CUSTOM_SFX_PEAK * 100)}'
+           if custom is not None else f'v{SYNTH_VERSION}')
     target = CACHE_DIR / f'{name}-{tag}-g{int(volume)}.wav'
     if target.exists():
         return target
