@@ -221,14 +221,17 @@ def evaluate(field: Field, side: SideType) -> float:
     '''Оценка позиции в сотых пешки со стороны side (больше — лучше для side).
 
     Состав: материал (без короля) + piece-square таблицы + пешечная структура
-    (штраф за сдвоенные и изолированные пешки) + бонус за разнопольную пару
-    слонов + оценка короля, интерполированная по фазе (миттельшпиль — беречь и держать пешечный
-    щит; эндшпиль — выходить в центр). Мобильность сознательно не считается: в
-    чистом Python генерация ходов на каждом листе замедлила бы движок в разы,
-    а PST уже косвенно поощряет развитие фигур.
+    (штраф за сдвоенные и изолированные пешки, бонус за проходные) + бонус за
+    разнопольную пару слонов + оценка короля, интерполированная по фазе
+    (миттельшпиль — беречь и держать пешечный щит; эндшпиль — выходить в центр).
+    Мобильность сознательно не считается: в чистом Python генерация ходов на
+    каждом листе замедлила бы движок в разы, а PST уже косвенно поощряет
+    развитие фигур.
     '''
     score = 0  # с точки зрения белых
     pawn_files = {SideType.WHITE: [0] * 8, SideType.BLACK: [0] * 8}
+    # Клетки пешек каждой стороны — нужны для определения проходных пешек.
+    pawn_squares = {SideType.WHITE: [], SideType.BLACK: []}
     # Цвета клеток слонов: 0 и 1. Пара есть только если присутствуют оба цвета.
     bishop_colors = {SideType.WHITE: set(), SideType.BLACK: set()}
     king_pos = {SideType.WHITE: None, SideType.BLACK: None}
@@ -245,6 +248,7 @@ def evaluate(field: Field, side: SideType) -> float:
         score += _pst_value(t, x, y, c)
         if t == PieceType.PAWN:
             pawn_files[c][x] += 1
+            pawn_squares[c].append((x, y))
         elif t == PieceType.BISHOP:
             bishop_colors[c].add((x + y) % 2)
         if t != PieceType.PAWN:
@@ -285,6 +289,29 @@ def evaluate(field: Field, side: SideType) -> float:
             right = files[fx + 1] if fx < 7 else 0
             if left == 0 and right == 0:
                 score -= sgn * 15 * n                     # изолированные
+
+    # Проходные пешки: на соседних файлах (и своём) впереди нет пешек
+    # противника. Бонус растёт с продвижением к превращению — в эндшпиле
+    # проходная часто решает партию. Веса по «шагам до превращения» (0..6).
+    passed_bonus = (0, 5, 15, 30, 55, 90, 140)
+    for c in (SideType.WHITE, SideType.BLACK):
+        enemy = SideType.opposite(c)
+        enemy_pawns = pawn_squares[enemy]
+        # Для белых «впереди» — меньший y, для чёрных — больший.
+        forward_sign = -1 if c == SideType.WHITE else 1
+        sgn = 1 if c == SideType.WHITE else -1
+        for px, py in pawn_squares[c]:
+            blocked = False
+            for ex, ey in enemy_pawns:
+                if abs(ex - px) <= 1 and (ey - py) * forward_sign > 0:
+                    blocked = True
+                    break
+            if blocked:
+                continue
+            # progress: 0 на начальной горизонтали, 6 у порога превращения.
+            progress = (py - 1) if c == SideType.BLACK else (6 - py)
+            progress = max(0, min(6, progress))
+            score += sgn * passed_bonus[progress]
 
     # Разнопольная пара: в множестве оба цвета клеток. Несколько слонов на
     # одном цвете дают один элемент и бонус не получают.

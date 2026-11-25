@@ -45,6 +45,25 @@ def test_eval_and_aspiration():
         assert evaluate(f, SideType.WHITE) == 0.0, \
             f'оценка королей не симметрична: K{(wx, wy)} vs K{(bx, by)}'
 
+    # Проходная пешка: чем ближе к превращению, тем выше оценка; зеркальная
+    # пара проходных (белая e5 vs чёрная e4) должна давать ровно 0.
+    def passed(py):
+        f = Field.empty()
+        f.set_piece(4, 7, PieceType.KING, SideType.WHITE)
+        f.set_piece(4, 0, PieceType.KING, SideType.BLACK)
+        f.set_piece(3, py, PieceType.PAWN, SideType.WHITE)
+        return evaluate(f, SideType.WHITE)
+    vals = [passed(py) for py in (6, 5, 4, 3, 2)]
+    assert all(a < b for a, b in zip(vals, vals[1:])), \
+        f'продвинутая проходная должна цениться выше: {vals}'
+    fm = Field.empty()
+    fm.set_piece(4, 7, PieceType.KING, SideType.WHITE)
+    fm.set_piece(4, 0, PieceType.KING, SideType.BLACK)
+    fm.set_piece(3, 3, PieceType.PAWN, SideType.WHITE)
+    fm.set_piece(3, 4, PieceType.PAWN, SideType.BLACK)
+    assert evaluate(fm, SideType.WHITE) == 0.0, 'зеркальные проходные не симметричны'
+
+
 
     # Эндшпиль: король в центре (e6) должен оцениваться выше, чем в углу (a1).
     def eg(kx, ky):
