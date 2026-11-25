@@ -62,6 +62,13 @@ EFFECT_NAMES = ('move', 'capture', 'promote')
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / 'assets' / 'music'
 MP3_EXTENSIONS = ('.mp3', '.wav', '.wmv', '.m4a')
 
+# Папка с пользовательскими WAV-эффектами: файл assets/sfx/<имя>.wav
+# (move/capture/promote) подменяет синтезированный звук этого эффекта.
+_CUSTOM_SFX_DIR = Path(__file__).resolve().parent.parent / 'assets' / 'sfx'
+# Целевой пик пользовательского эффекта (как у синтезированных) — чтобы
+# громкость была согласованной, а регулятор громкости применялся поверх.
+CUSTOM_SFX_PEAK = 0.5
+
 
 def list_music_files() -> list[Path]:
     '''Список музыкальных файлов из assets/music/, отсортированный по имени.'''
@@ -184,22 +191,31 @@ def _pad(freq: float, duration: float, amplitude: float,
 
 # --- Звуки щелчка (дерево) --------------------------------------------------
 
-def _click(duration: float, pitch: float, noise: float, seed: int) -> list[float]:
-    """Короткий деревянный стук — фигура ставится на клетку."""
+def _click(duration: float, pitch: float, noise: float, seed: int,
+           attack: float = 0.012) -> list[float]:
+    """Мягкий деревянный стук — фигура ставится на клетку.
+
+    attack — длительность плавной атаки в секундах: короткий fade-in убирает
+    резкий щелчок на фронте огибающей, делая звук теплее.
+    """
     rnd = random.Random(seed)
     count = int(SAMPLE_RATE * duration)
+    attack_samples = max(1, int(SAMPLE_RATE * attack))
     step = 2 * math.pi * pitch / SAMPLE_RATE
-    step_high = 2 * math.pi * pitch * 2.7 / SAMPLE_RATE
-    noise_alpha = 1.0 - math.exp(-2 * math.pi * 3200 / SAMPLE_RATE)
+    step_high = 2 * math.pi * pitch * 2.2 / SAMPLE_RATE
+    noise_alpha = 1.0 - math.exp(-2 * math.pi * 2400 / SAMPLE_RATE)
 
     samples = [0.0] * count
     filtered_noise = 0.0
     for i in range(count):
         t = i / SAMPLE_RATE
         envelope = math.exp(-t * 40)
+        # Полусинусоидальный fade-in: сглаживает фронт, убирая «клак».
+        if i < attack_samples:
+            envelope *= 0.5 - 0.5 * math.cos(math.pi * i / attack_samples)
         body = (math.sin(step * i) * 0.7 +
-                math.sin(step_high * i) * 0.25 +
-                math.sin(step * 4.4 * i) * 0.10)
+                math.sin(step_high * i) * 0.20 +
+                math.sin(step * 3.6 * i) * 0.06)
         white_noise = rnd.random() * 2 - 1
         filtered_noise += noise_alpha * (white_noise - filtered_noise)
         grain = filtered_noise * noise
@@ -211,14 +227,14 @@ def _click(duration: float, pitch: float, noise: float, seed: int) -> list[float
 
 def _effect_move() -> list[float]:
     """Тихий стук — обычный ход."""
-    return _normalize(_click(0.10, 280.0, 0.4, seed=1), 0.85)
+    return _normalize(_click(0.10, 280.0, 0.32, seed=1, attack=0.016), 0.5)
 
 
 def _effect_capture() -> list[float]:
     """Громкий стук — взятие фигуры."""
-    first = _click(0.12, 250.0, 0.55, seed=2)
-    second = _shift(_click(0.15, 170.0, 0.5, seed=3), 0.06)
-    return _normalize(_mix(first, second), 0.9)
+    first = _click(0.12, 250.0, 0.45, seed=2, attack=0.014)
+    second = _shift(_click(0.15, 170.0, 0.4, seed=3, attack=0.018), 0.06)
+    return _normalize(_mix(first, second), 0.5)
 
 
 def _effect_promote() -> list[float]:
@@ -226,7 +242,7 @@ def _effect_promote() -> list[float]:
     notes = (523.25, 659.25, 783.99)  # C5 E5 G5
     tracks = [_shift(_piano_key(f, 0.5, 0.25, decay=3.0), i * 0.10)
               for i, f in enumerate(notes)]
-    return _normalize(_mix(*tracks), 0.85)
+    return _normalize(_mix(*tracks), 0.5)
 
 
 # --- Фортепианная фоновая тема -----------------------------------------------
@@ -329,20 +345,83 @@ def _write_wav(path: Path, samples: list[float], gain: float,
     os.replace(tmp, path)
 
 
+def _custom_effect_samples(name: str) -> list[float] | None:
+    """Сэмплы пользовательского WAV-эффекта assets/sfx/<name>.wav.
+
+    Возвращает нормализованный к CUSTOM_SFX_PEAK моно-сигнал float в диапазоне
+    [-1, 1], либо None, если файла нет или он не читается. Поддерживаются PCM
+    8/16/32-бит и любое число каналов (каналы усредняются).
+    """
+    path = _CUSTOM_SFX_DIR / f'{name}.wav'
+    if not path.exists():
+        return None
+    try:
+        with wave.open(str(path), 'rb') as wf:
+            channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            frames = wf.readframes(wf.getnframes())
+    except (OSError, ValueError, wave.Error):
+        return None
+    if not frames:
+        return None
+
+    data = array.array('h' if sampwidth == 2 else 'i')
+    try:
+        data.frombytes(frames[:len(frames) - (len(frames) % (sampwidth * channels))])
+    except (OverflowError, ValueError):
+        return None
+    if sampwidth not in (1, 2, 4) or not data:
+        return None
+    if sys.byteorder == 'big':
+        data.byteswap()
+
+    # 8-битные WAV на диске — беззнаковые (смещённые на 128).
+    if sampwidth == 1:
+        raw = [((b - 128) / 128.0) for b in frames]
+    elif sampwidth == 2:
+        scale = 32768.0
+        raw = [v / scale for v in data]
+    else:
+        scale = 2147483648.0
+        raw = [v / scale for v in data]
+
+    if channels > 1:
+        mono = [
+            sum(raw[i:i + channels]) / channels
+            for i in range(0, len(raw) - channels + 1, channels)
+        ]
+    else:
+        mono = raw
+
+    normalized = _normalize(mono, CUSTOM_SFX_PEAK)
+    return normalized or None
+
+
 def cached_wav(name: str, volume: int) -> Path | None:
-    """Путь к готовому WAV нужной громкости (синтез при первом обращении)."""
+    """Путь к готовому WAV нужной громкости (синтез при первом обращении).
+
+    Если в assets/sfx/ лежит пользовательский <name>.wav — он подменяет
+    синтезированный звук (громкость регулятора применяется к нему так же).
+    """
     generator = _GENERATORS.get(name)
     if generator is None:
         return None
 
-    rate = MUSIC_SAMPLE_RATE if name == 'music' else SAMPLE_RATE
-    target = CACHE_DIR / f'{name}-v{SYNTH_VERSION}-g{int(volume)}.wav'
+    custom = _custom_effect_samples(name) if name != 'music' else None
+    if custom is not None:
+        rate = SAMPLE_RATE
+    else:
+        rate = MUSIC_SAMPLE_RATE if name == 'music' else SAMPLE_RATE
+
+    tag = 'custom' if custom is not None else f'v{SYNTH_VERSION}'
+    target = CACHE_DIR / f'{name}-{tag}-g{int(volume)}.wav'
     if target.exists():
         return target
 
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _write_wav(target, generator(), int(volume) / 100,
+        _write_wav(target, custom if custom is not None else generator(),
+                   int(volume) / 100,
                    rate=rate, fade_ms=30.0 if name == 'music' else 1.5)
     except (OSError, ValueError, wave.Error):
         return None
@@ -356,7 +435,7 @@ def cleanup_cache():
             return
         current = f'-v{SYNTH_VERSION}-'
         for p in CACHE_DIR.glob('*.wav'):
-            if current not in p.name:
+            if current not in p.name and '-custom-' not in p.name:
                 try:
                     p.unlink()
                 except OSError:
@@ -618,7 +697,7 @@ class SoundManager:
         if self._music_thread is thread:
             self._music_thread = None
 
-    def _music_worker(self, stop: threading.Event, volume: int):
+    def _music_worker(self, stop: threading.Event, volume: int, alias: str):
         """Фоновая музыка с управлением плейлистом из музыкального потока.
 
         Если пользовательских файлов нет — играет синтезированную фортепианную
@@ -629,8 +708,6 @@ class SoundManager:
         if mci is None:
             self._music_enabled = False
             return
-
-        alias = f'chess_music_{os.getpid()}'
         current_mci_volume = None
 
         def set_current_track(track: str | None):

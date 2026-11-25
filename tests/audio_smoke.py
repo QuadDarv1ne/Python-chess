@@ -85,7 +85,7 @@ def test_effect_ducks_and_restores_music():
     clock = [100.0]
     with patch.object(audio, 'perf_counter', side_effect=lambda: clock[0]):
         with patch.object(audio, 'list_music_files', return_value=[Path('track.mp3')]):
-            manager._music_worker(FakeStop(manager, clock), 50)
+            manager._music_worker(FakeStop(manager, clock), 50, 'chess_music_test')
 
     levels = [
         int(command.rsplit(' ', 1)[1])
@@ -111,7 +111,7 @@ def test_playlist_navigation_and_shuffle():
         audio, 'list_music_files',
         return_value=[Path('a.mp3'), Path('b.mp3'), Path('c.mp3')],
     ):
-        manager._music_worker(stop, 50)
+        manager._music_worker(stop, 50, 'chess_music_test')
 
     opened = [
         command.split('"', 2)[1]
@@ -132,7 +132,7 @@ def test_synthesized_track_name():
 
     with patch.object(audio, 'list_music_files', return_value=[]):
         with patch.object(audio, 'cached_wav', return_value=Path('fallback.wav')):
-            manager._music_worker(stop, 50)
+            manager._music_worker(stop, 50, 'chess_music_test')
 
     assert stop.track == 'Фортепианная тема', stop.track
     assert manager.current_track is None
@@ -147,7 +147,7 @@ def test_synthesized_audio_quality():
 
     for name in audio.EFFECT_NAMES:
         peak = max(abs(value) for value in audio._GENERATORS[name]())
-        assert 0.7 <= peak <= 0.9, (name, peak)
+        assert 0.45 <= peak <= 0.55, (name, peak)
 
     loop = audio._fade(
         audio._piano_loop(),
