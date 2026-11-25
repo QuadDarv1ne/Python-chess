@@ -147,7 +147,7 @@ def test_synthesized_audio_quality():
 
     for name in audio.EFFECT_NAMES:
         peak = max(abs(value) for value in audio._GENERATORS[name]())
-        assert 0.45 <= peak <= 0.55, (name, peak)
+        assert 0.25 <= peak <= 0.35, (name, peak)
 
     loop = audio._fade(
         audio._piano_loop(),

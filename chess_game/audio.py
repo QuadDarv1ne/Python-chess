@@ -27,7 +27,7 @@ SAMPLE_RATE = 44100
 MUSIC_SAMPLE_RATE = 22050
 
 # Версия синтеза: при изменении алгоритмов старый кэш игнорируется
-SYNTH_VERSION = 2
+SYNTH_VERSION = 3
 
 # Каталог кэша
 CACHE_DIR = Path(tempfile.gettempdir()) / 'python-chess-audio'
@@ -67,7 +67,7 @@ MP3_EXTENSIONS = ('.mp3', '.wav', '.wmv', '.m4a')
 _CUSTOM_SFX_DIR = Path(__file__).resolve().parent.parent / 'assets' / 'sfx'
 # Целевой пик пользовательского эффекта (как у синтезированных) — чтобы
 # громкость была согласованной, а регулятор громкости применялся поверх.
-CUSTOM_SFX_PEAK = 0.5
+CUSTOM_SFX_PEAK = 0.3
 
 
 def list_music_files() -> list[Path]:
@@ -192,30 +192,32 @@ def _pad(freq: float, duration: float, amplitude: float,
 # --- Звуки щелчка (дерево) --------------------------------------------------
 
 def _click(duration: float, pitch: float, noise: float, seed: int,
-           attack: float = 0.012) -> list[float]:
+           attack: float = 0.03) -> list[float]:
     """Мягкий деревянный стук — фигура ставится на клетку.
 
-    attack — длительность плавной атаки в секундах: короткий fade-in убирает
-    резкий щелчок на фронте огибающей, делая звук теплее.
+    attack — длительность плавной атаки в секундах: длинный fade-in
+    (≈30 мс) убирает резкий щелчок на фронте огибающей. Шум отфильтрован
+    очень низко (≈1200 Гц), чтобы он не давал «клака» на верхах.
     """
     rnd = random.Random(seed)
     count = int(SAMPLE_RATE * duration)
     attack_samples = max(1, int(SAMPLE_RATE * attack))
     step = 2 * math.pi * pitch / SAMPLE_RATE
-    step_high = 2 * math.pi * pitch * 2.2 / SAMPLE_RATE
-    noise_alpha = 1.0 - math.exp(-2 * math.pi * 2400 / SAMPLE_RATE)
+    step_high = 2 * math.pi * pitch * 1.8 / SAMPLE_RATE
+    noise_alpha = 1.0 - math.exp(-2 * math.pi * 1200 / SAMPLE_RATE)
 
     samples = [0.0] * count
     filtered_noise = 0.0
     for i in range(count):
         t = i / SAMPLE_RATE
-        envelope = math.exp(-t * 40)
-        # Полусинусоидальный fade-in: сглаживает фронт, убирая «клак».
+        # Более медленное затухание даёт тёплый хвост вместо «клака».
+        envelope = math.exp(-t * 25)
+        # Полусинусоидальный fade-in: сглаживает фронт.
         if i < attack_samples:
             envelope *= 0.5 - 0.5 * math.cos(math.pi * i / attack_samples)
-        body = (math.sin(step * i) * 0.7 +
-                math.sin(step_high * i) * 0.20 +
-                math.sin(step * 3.6 * i) * 0.06)
+        # Убраны высокие составляющие (3.6f и выше): они давали резкость.
+        body = (math.sin(step * i) * 0.85 +
+                math.sin(step_high * i) * 0.15)
         white_noise = rnd.random() * 2 - 1
         filtered_noise += noise_alpha * (white_noise - filtered_noise)
         grain = filtered_noise * noise
@@ -227,22 +229,22 @@ def _click(duration: float, pitch: float, noise: float, seed: int,
 
 def _effect_move() -> list[float]:
     """Тихий стук — обычный ход."""
-    return _normalize(_click(0.10, 280.0, 0.32, seed=1, attack=0.016), 0.5)
+    return _normalize(_click(0.13, 220.0, 0.08, seed=1, attack=0.035), 0.3)
 
 
 def _effect_capture() -> list[float]:
     """Громкий стук — взятие фигуры."""
-    first = _click(0.12, 250.0, 0.45, seed=2, attack=0.014)
-    second = _shift(_click(0.15, 170.0, 0.4, seed=3, attack=0.018), 0.06)
-    return _normalize(_mix(first, second), 0.5)
+    first = _click(0.14, 190.0, 0.12, seed=2, attack=0.03)
+    second = _shift(_click(0.18, 130.0, 0.10, seed=3, attack=0.04), 0.07)
+    return _normalize(_mix(first, second), 0.3)
 
 
 def _effect_promote() -> list[float]:
     """Три восходящих пианинных тона — превращение пешки."""
     notes = (523.25, 659.25, 783.99)  # C5 E5 G5
-    tracks = [_shift(_piano_key(f, 0.5, 0.25, decay=3.0), i * 0.10)
+    tracks = [_shift(_piano_key(f, 0.5, 0.18, decay=2.2), i * 0.10)
               for i, f in enumerate(notes)]
-    return _normalize(_mix(*tracks), 0.5)
+    return _normalize(_mix(*tracks), 0.3)
 
 
 # --- Фортепианная фоновая тема -----------------------------------------------
