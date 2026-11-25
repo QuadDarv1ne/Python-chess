@@ -264,7 +264,10 @@ def evaluate(field: Field, side: SideType) -> float:
             continue
         kx, ky = kp
         sgn = 1 if c == SideType.WHITE else -1
-        score += sgn * _king_pst(kx, ky, c, phase)
+        # _king_pst уже возвращает знак с точки зрения белых (для чёрных — со
+        # сменой знака), поэтому прибавляем как есть. Множитель sgn применяем
+        # только к штрафу за щит: штраф уменьшает оценку СВОЕЙ стороны.
+        score += _king_pst(kx, ky, c, phase)
         score -= sgn * _pawn_shield_penalty(field, kx, ky, c, phase)
 
     # Пешечная структура: сдвоенные (штраф за каждую лишнюю на файле) и

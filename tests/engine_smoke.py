@@ -35,6 +35,17 @@ def test_eval_and_aspiration():
     # Стартовая позиция симметрична → оценка 0.
     assert evaluate(Field(), SideType.WHITE) == 0.0, 'стартовая позиция не симметрична'
 
+    # Зеркальные позиции (только короли) тоже должны давать ровно 0: белый и
+    # чёрный король на симметричных относительно центра клетках. Регрессия на
+    # ошибку двойной смены знака в оценке короля (чёрный король «ценился» как белый).
+    for wx, wy, bx, by in ((6, 7, 6, 0), (4, 4, 4, 3), (2, 2, 2, 5)):
+        f = Field.empty()
+        f.set_piece(wx, wy, PieceType.KING, SideType.WHITE)
+        f.set_piece(bx, by, PieceType.KING, SideType.BLACK)
+        assert evaluate(f, SideType.WHITE) == 0.0, \
+            f'оценка королей не симметрична: K{(wx, wy)} vs K{(bx, by)}'
+
+
     # Эндшпиль: король в центре (e6) должен оцениваться выше, чем в углу (a1).
     def eg(kx, ky):
         f = Field.empty()

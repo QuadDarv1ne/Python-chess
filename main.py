@@ -342,13 +342,12 @@ class ChessApp:
                 cy = part['from_cy'] + (part['to_cy'] - part['from_cy']) * t
                 self._draw_glyph(cx, cy, part['glyph'], part['outline'], part['fill'])
 
-        # Координаты
+        # Координаты. board_to_screen уже учитывает переворот доски, поэтому
+        # подпись ставится под столбец/строку доски i и не должна переворачиваться
+        # повторно: иначе при игре за чёрных буквы и цифры шли бы в обратном порядке.
         for i in range(BOARD_SIZE):
             file_char = chr(ord('a') + i)
             rank_digit = str(BOARD_SIZE - i)
-            if self.flipped:
-                file_char = chr(ord('a') + (BOARD_SIZE - 1 - i))
-                rank_digit = str(i + 1)
             sx, _ = self.board_to_screen(i, 0)
             c.create_text(sx + CELL_SIZE // 2, total - MARGIN // 2,
                           text=file_char, font=('DejaVu Sans', LABEL_FONT_SIZE), fill='#e7cfa9')
