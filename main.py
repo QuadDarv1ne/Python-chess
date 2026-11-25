@@ -1,4 +1,5 @@
-"""Tkinter-интерфейс шахмат на основе chess_game.
+"""
+Tkinter-интерфейс шахмат на основе chess_game.
 
 Зеркальная по ролям замена checkers/main.py: канвасная доска 8×8 с глифами
 фигур, подсветка выбора и возможных ходов, анимация хода (скольжение),
@@ -10,6 +11,7 @@
     python main.py
 (или под бездисплейным окружением: xvfb-run -a python main.py)
 """
+
 import threading
 import queue
 import sys
