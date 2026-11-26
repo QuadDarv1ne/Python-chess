@@ -450,6 +450,42 @@ def test_from_pgn():
           f'status={gd.status} history={len(gd.history)}')
 
 
+def test_captured_pieces():
+    print('Тест: captured_pieces — реальные взятия из истории')
+
+    # Превращение пешки: пешка превращается, а не берётся — не должна в captured
+    g = Game.from_fen('8/1P6/8/8/8/8/6k1/4K3 w - - 0 1')
+    mv = next(m for m in g.legal_moves() if m.is_promotion)
+    g.make_move(mv)  # b8=Q
+    check('превращение пешки → нет взятий', len(g.captured_pieces()) == 0,
+          g.captured_pieces())
+
+    # Взятие: 1. e4 d5 2. exd5 — белая пешка бьёт чёрную
+    g = Game()
+    g.make_move(Move.double_pawn(4, 6, 4, 4))   # 1. e4
+    g.make_move(Move.double_pawn(3, 1, 3, 3))   # 1... d5
+    check('до взятия — 0', len(g.captured_pieces()) == 0, g.captured_pieces())
+    g.make_move(Move.normal(4, 4, 3, 3))        # 2. exd5
+    cp = g.captured_pieces()
+    check('1 взятие: белые взяли чёрную пешку',
+          cp == [(SideType.BLACK, PieceType.PAWN)], cp)
+
+    # Отмена возвращает список взятий к прежнему состоянию
+    g.undo()
+    check('после отмены взятия — 0', len(g.captured_pieces()) == 0, g.captured_pieces())
+
+    # Позиция из FEN без истории — взятий не показываем
+    g2 = Game.from_fen('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1')
+    check('позиция из FEN → нет взятий', len(g2.captured_pieces()) == 0)
+
+    # Взятие на проходе: белая пешка d5 бьёт чёрную c5 (только что c7-c5)
+    g4 = Game.from_fen('4k3/8/8/2pP4/8/8/8/4K3 w - c6 0 1')
+    g4.make_move(Move.en_passant(3, 3, 2, 2))  # dxc6 e.p.
+    cp4 = g4.captured_pieces()
+    check('en passant — 1 взятие чёрной пешки',
+          cp4 == [(SideType.BLACK, PieceType.PAWN)], cp4)
+
+
 def main():
     print('=== Дымовой тест game.py ===\n')
     test_fools_mate_via_game()
@@ -471,6 +507,8 @@ def main():
     test_from_fen()
     print()
     test_from_pgn()
+    print()
+    test_captured_pieces()
     print(f'\n=== Итог: PASS={PASS}, FAIL={FAIL} ===')
     sys.exit(0 if FAIL == 0 else 1)
 

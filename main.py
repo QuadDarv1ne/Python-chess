@@ -956,24 +956,19 @@ class ChessApp:
     def update_material(self):
         '''Панель взятых фигур и материального баланса (со стороны белых).
 
-        Взятые фигуры считаются как разница со стандартной расстановкой
-        (Q1/R2/B2/N2/P8 на сторону); баланс — из реального материала на доске,
-        так что он корректен и при превращениях пешек.
+        Взятые фигуры берутся из реальной истории ходов (game.captured_pieces),
+        поэтому панель корректна и при превращениях пешек, и для позиций из FEN.
+        Баланс — из фактического материала на доске (тоже верен при превращениях).
         '''
-        from collections import Counter
-        cur = {SideType.WHITE: Counter(), SideType.BLACK: Counter()}
-        for _, _, p in self.game.field.pieces():
-            if not p.is_empty and p.type != PieceType.KING:
-                cur[p.color][p.type] += 1
-        init = {PieceType.QUEEN: 1, PieceType.ROOK: 2,
-                PieceType.BISHOP: 2, PieceType.KNIGHT: 2, PieceType.PAWN: 8}
         order = (PieceType.QUEEN, PieceType.ROOK, PieceType.BISHOP,
                  PieceType.KNIGHT, PieceType.PAWN)
-        cap_w, cap_b = [], []   # типы, взятые белыми / чёрными
+        rank = {t: i for i, t in enumerate(order)}
+        # Сортируем взятые по старшинству фигур для стабильного вида
+        captured = sorted(self.game.captured_pieces(),
+                          key=lambda ct: (ct[0] != SideType.BLACK, rank[ct[1]]))
+        cap_w = [t for c, t in captured if c == SideType.BLACK]   # взяли белые
+        cap_b = [t for c, t in captured if c == SideType.WHITE]   # взяли чёрные
         val_w = val_b = 0
-        for t in order:
-            cap_w.extend([t] * max(0, init[t] - cur[SideType.BLACK][t]))
-            cap_b.extend([t] * max(0, init[t] - cur[SideType.WHITE][t]))
         for _, _, p in self.game.field.pieces():
             if p.is_empty or p.type == PieceType.KING:
                 continue

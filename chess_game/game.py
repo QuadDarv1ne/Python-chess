@@ -790,6 +790,25 @@ class Game:
             return f'Шах {self.__side_to_move.name_ru.lower()}'
         return f'Ход {self.__side_to_move.name_ru.lower()}'
 
+    def captured_pieces(self) -> list:
+        '''Список реально побитых фигур из истории партии: [(цвет, тип), ...].
+
+        Берётся из undo-данных каждого хода (''captured''), поэтому корректен
+        и при превращениях пешек, и для позиций, начатых из FEN (для них история
+        пуста — и это правильно, ведь прошлые взятия неизвестны). Короли в список
+        не попадают (в шахматах их не снимают с доски).
+        '''
+        result = []
+        for entry in self.__history:
+            captured = entry.prev_field_undo.get('captured')
+            if not captured:
+                continue
+            _, _, ctype, ccolor = captured
+            if ctype in (PieceType.NONE, PieceType.KING):
+                continue
+            result.append((ccolor, ctype))
+        return result
+
     def move_list_text(self) -> list:
         '''Список строк «1. e4 e5» для панели истории.
 
