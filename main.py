@@ -87,6 +87,9 @@ class ChessApp:
         self._hint_move = None
         # Оценка со стороны белых (сотые пешки) или None.
         self._eval_white = None
+        # Текущий прогресс поиска ИИ: (глубина, макс.глубина, оценка, сторона).
+        # Заполняется из progress-колбэка движка через очередь результатов.
+        self._search_progress = None
 
         self._build_menu()
         self._build_layout()
@@ -553,6 +556,7 @@ class ChessApp:
         if self.thinking:
             return
         self.thinking = True
+        self._search_progress = None
         self.update_status()
 
         cancel = threading.Event()
@@ -562,8 +566,14 @@ class ChessApp:
         side = self.game.side_to_move
         rights = self.game.castling_rights
         ep = self.game.en_passant_target
+
+        def progress(depth, max_depth, best_move, best_score):
+            # Вызывается из потока ИИ: только кладём в очередь, Tk не трогаем
+            self._result_queue.put(('progress', depth, max_depth, best_score, side, cancel))
+
         engine = Engine(max_depth=diff.depth, time_limit=diff.time_limit,
-                        noise_scale=diff.noise_scale, cancel=cancel)
+                        noise_scale=diff.noise_scale, cancel=cancel,
+                        progress=progress)
 
         def work():
             res = engine.search(field_copy, side, rights, ep,
@@ -589,7 +599,13 @@ class ChessApp:
         try:
             while True:
                 item = self._result_queue.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == 'hint':
+                tag = item[0] if isinstance(item, tuple) and item else None
+                if tag == 'progress':
+                    _, depth, max_depth, score, side, token = item
+                    if token is self.ai_cancel:
+                        self._search_progress = (depth, max_depth, score, side)
+                        self.update_status()
+                elif tag == 'hint':
                     _, res, token, side = item
                     if token is self.ai_cancel:
                         self._on_hint_done(res, side)
@@ -609,6 +625,7 @@ class ChessApp:
         if token is not self.ai_cancel:
             return
         self.thinking = False
+        self._search_progress = None
         if res.move is None or self.game.is_game_over or self.game.side_to_move != side:
             self.update_status()
             return
@@ -632,6 +649,7 @@ class ChessApp:
         if self.game.side_to_move != self.player_side:
             return
         self.thinking = True
+        self._search_progress = None
         self.update_status()
 
         cancel = threading.Event()
@@ -644,7 +662,12 @@ class ChessApp:
         side = self.game.side_to_move
         rights = self.game.castling_rights
         ep = self.game.en_passant_target
-        engine = Engine(max_depth=depth, time_limit=3.0, noise_scale=0.0, cancel=cancel)
+
+        def progress(depth_now, max_depth, best_move, best_score):
+            self._result_queue.put(('progress', depth_now, max_depth, best_score, side, cancel))
+
+        engine = Engine(max_depth=depth, time_limit=3.0, noise_scale=0.0,
+                        cancel=cancel, progress=progress)
 
         def work():
             res = engine.search(field_copy, side, rights, ep,
@@ -657,6 +680,7 @@ class ChessApp:
 
     def _on_hint_done(self, res, side):
         self.thinking = False
+        self._search_progress = None
         if res.move is not None and self.game.side_to_move == side and not self.game.is_game_over:
             self._hint_move = res.move
             self._eval_white = res.score if side == SideType.WHITE else -res.score
@@ -743,6 +767,8 @@ class ChessApp:
 
     def on_sound_toggle(self):
         self.sound.set_enabled(self._sound_var.get())
+        # Если звук недоступен на платформе — вернуть галку в снятое состояние
+        self._sound_var.set(self.sound.enabled)
 
     def on_music_toggle(self):
         self.sound.set_music_enabled(self._music_var.get())
@@ -798,6 +824,7 @@ class ChessApp:
             self.ai_cancel.set()
         self.ai_cancel = None
         self.thinking = False
+        self._search_progress = None
 
     # -- PGN / FEN --
 
@@ -907,6 +934,11 @@ class ChessApp:
     def update_status(self):
         if self.thinking:
             text = f'ИИ думает… ({self.game.difficulty.name_ru})'
+            if self._search_progress is not None:
+                depth, max_depth, score, side = self._search_progress
+                white = score if side == SideType.WHITE else -score
+                sign = '+' if white >= 0 else ''
+                text += f'  гл.{depth}/{max_depth}  {sign}{white / 100:.2f}'
         else:
             text = self.game.result_ru()
             if self._eval_white is not None and not self.game.is_game_over:

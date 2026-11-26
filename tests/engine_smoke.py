@@ -149,6 +149,18 @@ def main():
     assert dt < 5.0, f'слишком медленно: {dt:.2f}s'
     print('  [PASS] ход легален и найден быстро\n')
 
+    # 1b. progress-колбэк: вызывается по итерациям углубления с корректными
+    #     аргументами (depth, max_depth, best_move, score). Его использует UI,
+    #     чтобы показывать глубину/оценку во время раздумий.
+    calls = []
+    engine_prog = Engine(max_depth=3, time_limit=2.0, noise_scale=0.0,
+                         progress=lambda d, m, mv, sc: calls.append((d, m, mv, sc)))
+    engine_prog.search(Field(), SideType.WHITE, R.CastlingRights(), None)
+    assert calls, 'progress-колбэк не вызывался'
+    assert all(0 < d <= m for d, m, _, _ in calls), calls
+    assert all(mv is not None for _, _, mv, _ in calls), 'best_move не передан в progress'
+    print(f'  [PASS] progress-колбэк: {len(calls)} итераций\n')
+
     # 2. Мат в 1: позиция детского мата перед 4.Qxf7# (ход белых)
     field = Field()
     rights = R.CastlingRights()
