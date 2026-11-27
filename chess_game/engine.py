@@ -530,7 +530,12 @@ class Engine:
     def __quiesce(self, field: Field, side: SideType, rights: R.CastlingRights,
                   ep: Point, halfmove: int, ply: int, alpha: float, beta: float) -> float:
         self.__nodes += 1
-        if (self.__nodes & 2047) == 0 and self.__time_is_up():
+        # Отмена (лимит времени/внешний стоп) проверяется по дешёвому флагу на
+        # каждом узле: после отмены нельзя доигрывать оставшееся поддерево —
+        # иначе лимит превышается в разы (каждый узел ещё и зовёт evaluate).
+        if self.__cancelled:
+            return evaluate(field, side)
+        if (self.__nodes & 511) == 0 and self.__time_is_up():
             return evaluate(field, side)
         if ply >= MAX_QPLY:
             return evaluate(field, side)
@@ -548,7 +553,7 @@ class Engine:
             moves = self.__order(field, moves, ply)
             best = -inf
             for move in moves:
-                if (self.__nodes & 2047) == 0 and self.__time_is_up():
+                if self.__cancelled:
                     break
                 new_half = _next_halfmove(field, move, halfmove)
                 undo = R.apply_move(field, move)
@@ -557,6 +562,8 @@ class Engine:
                 value = -self.__quiesce(field, SideType.opposite(side), new_rights,
                                         new_ep, new_half, ply + 1, -beta, -alpha)
                 R.undo_move(field, undo)
+                if self.__cancelled:
+                    break
                 if value > best:
                     best = value
                     if value > alpha:
@@ -566,6 +573,8 @@ class Engine:
             if not moves:
                 # Нет уклонений из-под шаха — это мат (pat из-под шаха не бывает)
                 return -(MATE_SCORE - ply)
+            if best == -inf:   # отмена до первого хода — оценка не нужна
+                return evaluate(field, side)
             return best
 
         # Не под шахом: stand-pat + только взятия/превращения
@@ -576,6 +585,8 @@ class Engine:
             alpha = stand_pat
 
         for move in self.__order(field, _capture_moves(field, side, rights, ep), ply):
+            if self.__cancelled:
+                break
             # Delta-отсечение: даже выиграв взятие, не перебить alpha — пропускаем
             if stand_pat + _tactic_gain(field, move) + DELTA_MARGIN < alpha:
                 continue
@@ -589,6 +600,8 @@ class Engine:
             value = -self.__quiesce(field, SideType.opposite(side), new_rights,
                                     new_ep, new_half, ply + 1, -beta, -alpha)
             R.undo_move(field, undo)
+            if self.__cancelled:
+                break
             if value >= beta:
                 return value
             if value > alpha:
@@ -602,7 +615,9 @@ class Engine:
                   ep: Point, halfmove: int, depth: int, ply: int,
                   alpha: float, beta: float) -> float:
         self.__nodes += 1
-        if (self.__nodes & 2047) == 0 and self.__time_is_up():
+        if self.__cancelled:
+            return evaluate(field, side)
+        if (self.__nodes & 511) == 0 and self.__time_is_up():
             return evaluate(field, side)
         # Ограничение ply страхует от бесконтрольного роста дерева при
         # check extensions (длинные серии шахов).
@@ -641,7 +656,7 @@ class Engine:
                     and _has_non_pawn_material(field, side)):
                 value = -self.__negamax(field, SideType.opposite(side), rights, None,
                                        halfmove, depth - 1 - 2, ply + 1, -beta, -beta + 1)
-                if self.__time_is_up():
+                if self.__cancelled:
                     return evaluate(field, side)
                 if value >= beta:
                     return beta   # не возвращаем value: null-окно даёт лишь нижнюю границу
@@ -652,7 +667,7 @@ class Engine:
             best_move = None
             legal_count = 0
             for move in moves:
-                if (self.__nodes & 2047) == 0 and self.__time_is_up():
+                if self.__cancelled:
                     break
 
                 new_half = _next_halfmove(field, move, halfmove)
@@ -678,7 +693,7 @@ class Engine:
                 if reduce:
                     value = -self.__negamax(field, opp, new_rights, new_ep, new_half,
                                             full_depth - 1, ply + 1, -beta, -alpha)
-                    if self.__time_is_up():
+                    if self.__cancelled:
                         R.undo_move(field, undo)
                         break
                     if value > alpha:
@@ -690,7 +705,7 @@ class Engine:
                                             full_depth, ply + 1, -beta, -alpha)
                 R.undo_move(field, undo)
 
-                if self.__time_is_up():
+                if self.__cancelled:
                     break
 
                 if value > best:
@@ -756,7 +771,7 @@ class Engine:
                                     new_ep, new_half, depth - 1, 1, -beta, -alpha)
             R.undo_move(field, undo)
 
-            if self.__time_is_up():
+            if self.__cancelled:
                 break
 
             if value > best:
@@ -771,7 +786,7 @@ class Engine:
                 # fail-high в корне: найден ход, превышающий верхнюю границу окна
                 break
 
-        if best_moves and not self.__time_is_up():
+        if best_moves and not self.__cancelled:
             # Флаг записи (EXACT/LOWER/UPPER) определяется сам по alpha_orig/beta,
             # так что аспирационные окна не портят TT неверным «точным» значением.
             self.__tt_store(self.__tt_slot(root_key, halfmove, depth), depth,
@@ -839,13 +854,13 @@ class Engine:
                 b = prev_score + window
                 score, candidates = self.__search_root(field, side, rights, ep,
                                                        halfmove, depth, a, b)
-                if not self.__time_is_up() and (score <= a or score >= b):
+                if not self.__cancelled and (score <= a or score >= b):
                     score, candidates = self.__search_root(field, side, rights, ep,
                                                            halfmove, depth, -inf, inf)
             else:
                 score, candidates = self.__search_root(field, side, rights, ep,
                                                        halfmove, depth)
-            if candidates and not self.__time_is_up():
+            if candidates and not self.__cancelled:
                 best_move = candidates[0]
                 best_score = score
                 reached_depth = depth
@@ -856,7 +871,7 @@ class Engine:
                     self.progress(depth, self.max_depth, best_move, best_score)
                 except Exception:
                     pass
-            if self.__time_is_up() or depth >= self.max_depth:
+            if self.__cancelled or depth >= self.max_depth:
                 break
             if abs(score) >= MATE_THRESHOLD:
                 # Найден мат — углубляться незачем
@@ -864,7 +879,7 @@ class Engine:
 
         # Осмысленная случайность: на лёгких уровнях выбираем среди ходов,
         # близких к лучшему, чтобы ИИ не играл детерминированно и не слишком сильно.
-        if self.noise_scale > 0 and best_move is not None and not self.__time_is_up():
+        if self.noise_scale > 0 and best_move is not None and not self.__cancelled:
             scored = []
             for move in root_moves:
                 new_half = _next_halfmove(field, move, halfmove)
@@ -878,7 +893,7 @@ class Engine:
                                         new_ep, new_half, max(0, reached_depth - 1), 1, -inf, inf)
                 R.undo_move(field, undo)
                 scored.append((value, move))
-                if self.__time_is_up():
+                if self.__cancelled:
                     scored = []
                     break
             if scored:
@@ -892,6 +907,17 @@ class Engine:
         # нему из корня (поле восстанавливается откатом).
         pv = (self._extract_pv(field, side, rights, ep, halfmove)
               if best_move is not None else [])
+
+        # Гарантия: если поиск прерван отменой и лучшего хода нет — вернуть
+        # любой легальный. В UI это критично: ИИ не должен «замораживать» партию.
+        if best_move is None and has_legal:
+            for m in root_moves:
+                u = R.apply_move(field, m)
+                ok = not R.in_check(field, side)
+                R.undo_move(field, u)
+                if ok:
+                    best_move = m
+                    break
 
         return SearchResult(
             move=best_move,

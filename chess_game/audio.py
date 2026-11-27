@@ -365,27 +365,28 @@ def _custom_effect_samples(name: str) -> list[float] | None:
             frames = wf.readframes(wf.getnframes())
     except (OSError, ValueError, wave.Error):
         return None
+    if not frames or sampwidth not in (1, 2, 4) or channels < 1:
+        return None
+    # Обрезаем до целого числа фреймов (sampwidth * channels байт на фрейм),
+    # иначе хвостовой неполный фрейм даст сдвиг каналов.
+    frame_bytes = sampwidth * channels
+    frames = frames[:len(frames) - (len(frames) % frame_bytes)]
     if not frames:
         return None
 
-    data = array.array('h' if sampwidth == 2 else 'i')
-    try:
-        data.frombytes(frames[:len(frames) - (len(frames) % (sampwidth * channels))])
-    except (OverflowError, ValueError):
-        return None
-    if sampwidth not in (1, 2, 4) or not data:
-        return None
-    if sys.byteorder == 'big':
-        data.byteswap()
-
-    # 8-битные WAV на диске — беззнаковые (смещённые на 128).
     if sampwidth == 1:
-        raw = [((b - 128) / 128.0) for b in frames]
-    elif sampwidth == 2:
-        scale = 32768.0
-        raw = [v / scale for v in data]
+        # 8-битные WAV беззнаковые (смещены на 128). Парсим байты напрямую:
+        # array('i').frombytes здесь неприменим (требует кратности 4 байтам).
+        raw = [(b - 128) / 128.0 for b in frames]
     else:
-        scale = 2147483648.0
+        data = array.array('h' if sampwidth == 2 else 'i')
+        try:
+            data.frombytes(frames)
+        except (OverflowError, ValueError):
+            return None
+        if sys.byteorder == 'big':
+            data.byteswap()
+        scale = 32768.0 if sampwidth == 2 else 2147483648.0
         raw = [v / scale for v in data]
 
     if channels > 1:
@@ -395,9 +396,10 @@ def _custom_effect_samples(name: str) -> list[float] | None:
         ]
     else:
         mono = raw
+    if not mono:
+        return None
 
-    normalized = _normalize(mono, CUSTOM_SFX_PEAK)
-    return normalized or None
+    return _normalize(mono, CUSTOM_SFX_PEAK) or None
 
 
 def cached_wav(name: str, volume: int) -> Path | None:

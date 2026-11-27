@@ -18,6 +18,7 @@ from chess_game.move import Move
 from chess_game.point import Point
 from chess_game import rules as R
 from chess_game.engine import Engine, MATE_THRESHOLD
+from chess_game.game import Game
 
 
 def apply_line(field, rights, ep, moves):
@@ -160,6 +161,26 @@ def main():
     assert all(0 < d <= m for d, m, _, _ in calls), calls
     assert all(mv is not None for _, _, mv, _ in calls), 'best_move не передан в progress'
     print(f'  [PASS] progress-колбэк: {len(calls)} итераций\n')
+
+    # 1c. Соблюдение лимита времени и гарантия легального хода при отмене.
+    #     Раньше quiescence не прерывался по времени: в тактически «шумной»
+    #     позиции поиск шёл 15+ с при лимите 1.5 с и мог вернуть move=None,
+    #     из-за чего ИИ в UI «зависал». Теперь отмена проверяется на каждом
+    #     узле, а при наличии легальных ходов ход возвращается всегда.
+    busy_fen = '1nb3nr/rp2k1b1/p5p1/1Ppppp1P/1R2PP2/P2P1K1R/4B1P1/1NB3N1 b - - 5 28'
+    bg = Game.from_fen(busy_fen)
+    busy_legal = bg.legal_moves()
+    t0 = time.perf_counter()
+    busy_eng = Engine(max_depth=3, time_limit=1.5, noise_scale=0.0)
+    busy_res = busy_eng.search(Field.copy(bg.field), bg.side_to_move,
+                               bg.castling_rights, bg.en_passant_target,
+                               rep_keys=bg.repetition_keys(),
+                               halfmove=bg.halfmove_clock)
+    busy_dt = time.perf_counter() - t0
+    assert busy_dt < 4.0, f'лимит времени не соблюдён: {busy_dt:.2f}s'
+    assert busy_res.move is not None, 'при наличии легальных ходов вернулся None'
+    assert busy_res.move in busy_legal, f'нелегальный ход {busy_res.move}'
+    print(f'  [PASS] лимит времени: {busy_dt:.2f}s, ход легален\n')
 
     # 2. Мат в 1: позиция детского мата перед 4.Qxf7# (ход белых)
     field = Field()

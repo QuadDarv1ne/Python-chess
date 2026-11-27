@@ -6,6 +6,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Консоль Windows по умолчанию в cp1251 — переключаем вывод в UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8')
+
 from chess_game import audio
 
 
@@ -158,8 +163,47 @@ def test_synthesized_audio_quality():
     print('[PASS] filtered effects, safe peaks and smooth piano loop edges')
 
 
+def test_custom_sfx_bit_depths():
+    """Пользовательский WAV читается при 8/16/32-бит и любом числе каналов.
+
+    Раньше 8-битные WAV (беззнаковые, длина не кратна 4) не загружались:
+    array('i').frombytes() кидал ValueError, и эффект молча отключался.
+    """
+    import struct
+    import tempfile
+    import wave
+
+    tmp = Path(tempfile.mkdtemp())
+    saved_dir = audio._CUSTOM_SFX_DIR
+    audio._CUSTOM_SFX_DIR = tmp
+    try:
+        def write(name, channels, sampwidth, payload):
+            with wave.open(str(tmp / f'{name}.wav'), 'wb') as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(sampwidth)
+                wf.setframerate(8000)
+                wf.writeframes(payload)
+
+        # 8-бит моно, 5 фреймов (нечётная длина — раньше падало)
+        write('move', 1, 1, bytes([128, 200, 100, 30, 250]))
+        # 8-бит стерео, 3 фрейма
+        write('capture', 2, 1, bytes([128, 128, 200, 150, 100, 80]))
+        # 16-бит моно
+        write('promote', 1, 2, struct.pack('<5h', 0, 1000, -1000, 500, -500))
+
+        for name in ('move', 'capture', 'promote'):
+            samples = audio._custom_effect_samples(name)
+            assert samples, f'{name}: WAV не прочитан'
+            assert all(-1.0 <= v <= 1.0 for v in samples), name
+            assert max(abs(v) for v in samples) > 0.0, f'{name}: тишина'
+        print('[PASS] custom WAV: 8/16-бит, моно/стерео читаются')
+    finally:
+        audio._CUSTOM_SFX_DIR = saved_dir
+
+
 if __name__ == '__main__':
     test_effect_ducks_and_restores_music()
     test_playlist_navigation_and_shuffle()
     test_synthesized_track_name()
     test_synthesized_audio_quality()
+    test_custom_sfx_bit_depths()
