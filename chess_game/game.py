@@ -474,6 +474,18 @@ class Game:
                 raise ValueError(f'ход {i} «{san}»: {e}')
             if not game.make_move(move):
                 raise ValueError(f'ход {i} «{san}» нелегален в текущей позиции')
+        # Устанавливаем статус по результату PGN, если он указан
+        result = headers.get('Result', '')
+        if not result:
+            # Проверяем, есть ли результат в тексте ходов
+            for tok in body.split():
+                if tok in ('1-0', '0-1', '1/2-1/2', '*'):
+                    result = tok
+                    break
+        if result == '1-0' or result == '0-1':
+            game._Game__status = 'checkmate'
+        elif result == '1/2-1/2':
+            game._Game__status = 'stalemate'
         return game
 
     # -- Повторы позиций --
